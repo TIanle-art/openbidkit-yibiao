@@ -1623,9 +1623,30 @@ async function htmlTableToDocx($, tableNode, context) {
       colIdx += Math.max(1, effectiveSpan);
     }
   }
+  // 列宽 = 「先给每列一个绝对保底宽度，再把剩余宽度按内容长度比例分掉」。
+  //
+  // 只按比例分是不够的：short 列（「序号」「系统/部件名称」）即使把权重下限写成 8，
+  // 只要同表里有一列 48 字的规格栏，8/(8+9+48+8+36) 只剩表宽的 7% ≈ 11mm，
+  // 连 2 个汉字都排不下，导出件里就是「一字一行」的竖排。
+  // 权重下限是**相对**下限，管不住这种情况；必须落到**绝对宽度**上。
   const colWeights = colCharLengths.map((len) => Math.min(60, Math.max(8, len)));
   const totalWeight = colWeights.reduce((sum, w) => sum + w, 0);
-  const columnWidths = colWeights.map((w) => Math.round((tableWidthTwips * w) / totalWeight));
+
+  const CHAR_WIDTH_TWIPS = 240;   // 小四(12pt) 全角字符宽度
+  const MIN_COL_CHARS = 4;        // 每列至少排得下 4 个汉字
+  const rawFloors = colCharLengths.map(
+    (len) => Math.min(Math.max(len, 2), MIN_COL_CHARS) * CHAR_WIDTH_TWIPS,
+  );
+  // 保底总宽超过表宽 60% 时整体等比压缩，避免多列表格把比例分配挤成 0。
+  const floorTotal = rawFloors.reduce((sum, w) => sum + w, 0);
+  const floorScale = floorTotal > tableWidthTwips * 0.6 ? (tableWidthTwips * 0.6) / floorTotal : 1;
+  const floors = rawFloors.map((w) => Math.round(w * floorScale));
+  const floorSum = floors.reduce((sum, w) => sum + w, 0);
+  const distributable = Math.max(0, tableWidthTwips - floorSum);
+
+  const columnWidths = colWeights.map(
+    (w, index) => floors[index] + Math.round((distributable * w) / totalWeight),
+  );
   const sumWidths = columnWidths.reduce((sum, w) => sum + w, 0);
   columnWidths[columnWidths.length - 1] += (tableWidthTwips - sumWidths);
 

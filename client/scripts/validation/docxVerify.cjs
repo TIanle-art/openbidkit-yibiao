@@ -465,6 +465,12 @@ function checkTableColumnWidths(tables, options = {}) {
   const minShareRatio = Number.isFinite(options.minShareRatio) ? options.minShareRatio : 0.5;
   const MAX_CHARS = 60;
   const MIN_CHARS = 8;
+  // 绝对宽度下限：一列至少要排得下 min(该列最长文本, N) 个全角字，否则会退化成
+  // 「一字一行」的竖排。只查相对占比是不够的——相对占比检查会放过「所有列都按比例
+  // 缩水」的情况，而实际缺陷恰恰是短列被长列挤到绝对宽度不足。
+  const CHAR_WIDTH_TWIPS = 240;   // 小四(12pt) 全角字符宽度
+  const MIN_COL_CHARS = 4;
+  const absoluteTolerance = Number.isFinite(options.absoluteTolerance) ? options.absoluteTolerance : 0.8;
   const violations = [];
 
   tables.forEach((table, tableIndex) => {
@@ -489,16 +495,26 @@ function checkTableColumnWidths(tables, options = {}) {
     weights.forEach((weight, columnIndex) => {
       const actualShare = table.widths[columnIndex] / totalWidth;
       const demandShare = weight / totalWeight;
-      if (actualShare < demandShare * minShareRatio - 1e-9) {
-        violations.push({
-          table: tableIndex + 1,
-          column: columnIndex + 1,
-          width: table.widths[columnIndex],
-          actualShare: Number(actualShare.toFixed(4)),
-          demandShare: Number(demandShare.toFixed(4)),
-          longestText: colCharLengths[columnIndex],
-        });
-      }
+      const longestText = colCharLengths[columnIndex];
+      // 空列不参与绝对宽度要求（补齐产生的空列会被并进跨列，不应误报）。
+      const requiredTwips = longestText === 0
+        ? 0
+        : Math.min(Math.max(longestText, 2), MIN_COL_CHARS) * CHAR_WIDTH_TWIPS;
+
+      const shareStarved = actualShare < demandShare * minShareRatio - 1e-9;
+      const widthStarved = requiredTwips > 0 && table.widths[columnIndex] < requiredTwips * absoluteTolerance - 1e-9;
+      if (!shareStarved && !widthStarved) return;
+
+      violations.push({
+        table: tableIndex + 1,
+        column: columnIndex + 1,
+        width: table.widths[columnIndex],
+        actualShare: Number(actualShare.toFixed(4)),
+        demandShare: Number(demandShare.toFixed(4)),
+        longestText,
+        requiredTwips,
+        reason: shareStarved ? 'share' : 'absolute',
+      });
     });
   });
 
