@@ -50,6 +50,25 @@ test('设备清单回退提取过滤非定量模板行', () => {
   }]);
 });
 
+test('设备清单带上所属章节，来源可回溯到原文位置', () => {
+  const targets = extractProcurementTargetsFromText([
+    '# 招标文件',
+    '## 第三章 供货范围',
+    '| 序号 | 设备名称 | 规格型号 | 数量 | 单位 |',
+    '|---|---|---|---|---|',
+    '| 1 | 电动葫芦 | LD5t | 2 | 台 |',
+    '## 第五章 技术规格',
+    '| 设备名称 | 规格型号 | 数量 | 单位 |',
+    '|---|---|---|---|',
+    '| 起升机构 | NC2060-QS | 1 | 套 |',
+  ].join('\n'));
+  assert.equal(targets.length, 2);
+  assert.equal(targets[0].source_refs[0].section, '第三章 供货范围');
+  assert.equal(targets[1].source_refs[0].section, '第五章 技术规格');
+  // 没有 page 时 section 就是最小可回溯单位，不能退化成只有 label
+  assert.ok(targets.every((item) => item.source_refs[0].section));
+});
+
 test('设备类规划将过度粗粒度参数主题稳定深化为专业维度', () => {
   const equipmentRequirements = `设备采购及安装。型号规格、额定能力和工作级别。
 钢结构主梁、支腿和材质。起升机构、钢丝绳、卷筒和制动。大车小车运行机构与轨道。

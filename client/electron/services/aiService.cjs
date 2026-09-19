@@ -22,6 +22,7 @@ const {
   writeAiLog,
 } = require('../utils/aiLog.cjs');
 const textTokenStatsStore = require('./textTokenStatsStore.cjs');
+const { toVisionFallbackError } = require('./visionFallback.cjs');
 const { normalizeTokenUsage } = textTokenStatsStore;
 
 const AI_REQUEST_TIMEOUT_MS = 600000;
@@ -831,13 +832,14 @@ async function describeImageWithConfig(app, config, filePath, context = {}) {
   if (!mime.startsWith('image/')) throw new Error('当前文件不是支持识别的图片格式');
   const sourceContext = String(context.sourceContext || '').trim().slice(0, 1000);
   const originalName = String(context.originalName || path.basename(sourcePath)).trim();
-  return collectJsonResponseWithConfig(app, config, {
-    messages: [
-      {
-        role: 'system',
-        content: '你是投标资料图片标注助手。只描述图片中真实可见的对象、文字、结构、场景和用途，不得根据文件名臆测。输出严格 JSON。',
-      },
-      {
+  try {
+    return await collectJsonResponseWithConfig(app, config, {
+      messages: [
+        {
+          role: 'system',
+          content: '你是投标资料图片标注助手。只描述图片中真实可见的对象、文字、结构、场景和用途，不得根据文件名臆测。输出严格 JSON。',
+        },
+        {
         role: 'user',
         content: [
           {
@@ -851,13 +853,16 @@ async function describeImageWithConfig(app, config, filePath, context = {}) {
         ],
       },
     ],
-    response_format: { type: 'json_object' },
-    progressLabel: '图片语义标注',
-    failureMessage: '模型未返回有效的图片名称和描述',
-    max_retries: 0,
-    normalizer: normalizeImageDescriptionResult,
-    logTitle: '图片知识库-语义标注',
-  });
+      response_format: { type: 'json_object' },
+      progressLabel: '图片语义标注',
+      failureMessage: '模型未返回有效的图片名称和描述',
+      max_retries: 0,
+      normalizer: normalizeImageDescriptionResult,
+      logTitle: '图片知识库-语义标注',
+    });
+  } catch (error) {
+    throw toVisionFallbackError(error, { filePath: sourcePath, modelName: config?.model_name });
+  }
 }
 
 // 保留 Pi 工具调用协议字段，并统一应用当前文本模型配置。

@@ -20,7 +20,9 @@ async function createMarkdownRenderer(options) {
     html: options.allowRawHtml,
     linkify: false,
     typographer: false,
-    breaks: false,
+    // 导出场景需要 breaks=true：生成内容以「一行一条」书写，
+    // 默认把单换行当软空格会把标题、条目与正文粘成一段。
+    breaks: options.breaks === true,
   });
 
   renderer.use(cjkFriendly);
@@ -35,8 +37,9 @@ async function getMarkdownRenderer(options = {}) {
   const normalized = {
     allowRawHtml: options.allowRawHtml === true,
     enableGfm: options.enableGfm !== false,
+    breaks: options.breaks === true,
   };
-  const cacheKey = `${normalized.allowRawHtml ? 'html' : 'no-html'}:${normalized.enableGfm ? 'gfm' : 'commonmark'}`;
+  const cacheKey = `${normalized.allowRawHtml ? 'html' : 'no-html'}:${normalized.enableGfm ? 'gfm' : 'commonmark'}:${normalized.breaks ? 'breaks' : 'softbreak'}`;
   const cached = rendererCache.get(cacheKey);
   if (cached) return cached;
 

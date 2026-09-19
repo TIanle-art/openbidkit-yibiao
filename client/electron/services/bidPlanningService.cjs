@@ -94,11 +94,26 @@ function splitSourceClauses(sourceText) {
     .filter((line) => line.length >= 6 && line.length <= 420));
 }
 
+// 招标原文里的章节标题：设备清单表格本身没有页码，能给出的最小可回溯单位就是
+// 它所在的章节。只写 label 无法跳转到原文，所以提取时要把最近的上级标题一起记下来。
+const SOURCE_HEADING_PATTERNS = [
+  /^\s{0,3}#{1,6}\s+(.+?)\s*#*\s*$/,
+  /^\s*第\s*[一二三四五六七八九十百\d]+\s*[章节篇部分]\s*(.*)$/,
+];
+
 function extractProcurementTargetsFromText(sourceText) {
   const lines = String(sourceText || '').split(/\r?\n/);
   const targets = [];
+  let currentSection = '';
   for (let index = 0; index < lines.length; index += 1) {
-    const header = lines[index];
+    const line = lines[index];
+    const heading = SOURCE_HEADING_PATTERNS.map((pattern) => pattern.exec(line)).find(Boolean);
+    if (heading) {
+      const title = String(heading[1] || '').trim();
+      if (title) currentSection = title;
+      continue;
+    }
+    const header = line;
     if (!/^\s*\|/.test(header) || !/(?:设备|货物|采购内容).*名称/.test(header) || !/数量/.test(header)) continue;
     const columns = header.split('|').slice(1, -1).map((item) => item.trim());
     const nameIndex = columns.findIndex((item) => /名称/.test(item));
@@ -120,7 +135,7 @@ function extractProcurementTargetsFromText(sourceText) {
         quantity,
         unit: unitIndex >= 0 ? String(cells[unitIndex] || '').trim() : '',
         category: 'equipment',
-        source_refs: [{ label: '招标文件设备/货物清单' }],
+        source_refs: [{ label: '招标文件设备/货物清单', ...(currentSection ? { section: currentSection } : {}) }],
       });
     }
   }

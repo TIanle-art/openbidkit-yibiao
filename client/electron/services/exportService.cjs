@@ -10,8 +10,10 @@ const { getGeneratedImagesDir, getImageLibraryDir, getImportedImagesDir } = requ
 const { REMOTE_IMAGE_RETRY_ATTEMPTS, REMOTE_IMAGE_RETRY_DELAY_MS } = require('../utils/remoteImageRetry.cjs');
 const { renderMarkdownHtml } = require('../utils/renderMarkdownHtml.cjs');
 const { getLocalImageRenderService } = require('./localImageRenderService.cjs');
+const { evaluateContaminationGate } = require('./contaminationGuard.cjs');
 const {
   AlignmentType,
+  Bookmark,
   BorderStyle,
   Document,
   ExternalHyperlink,
@@ -848,6 +850,61 @@ function expandInlineMarkdownTableRows(line) {
   return [prefix.trimEnd(), ...tableRows];
 }
 
+/**
+ * 把一段 Markdown 表格的所有行补齐到同一列数。
+ *
+ * 生成内容里常见「表头 2 列、数据行 4 列」的写法（例如《申请人基本情况表》），
+ * 而 GFM 规定数据行超出表头列数的单元格会被直接丢弃——导出后这些内容会凭空消失。
+ * 这里先把每行补齐到该表格的最大列数，再交给渲染器，确保不丢单元格。
+ *
+ * 注意：分隔行必须补齐为合法的 `---`，空格会导致渲染器直接放弃表格识别。
+ */
+function padMarkdownTableBlocks(lines) {
+  const result = [];
+  let insideFence = false;
+  let index = 0;
+
+  while (index < lines.length) {
+    const line = lines[index];
+    if (/^\s*```+/.test(line)) {
+      insideFence = !insideFence;
+      result.push(line);
+      index += 1;
+      continue;
+    }
+    if (insideFence || !isMarkdownTableRowLine(line)) {
+      result.push(line);
+      index += 1;
+      continue;
+    }
+
+    let lastIndex = index;
+    while (lastIndex + 1 < lines.length && isMarkdownTableRowLine(lines[lastIndex + 1])) {
+      lastIndex += 1;
+    }
+
+    const block = lines.slice(index, lastIndex + 1);
+    const cellsPerRow = block.map((rowLine) => splitMarkdownTableCells(rowLine));
+    const maxColumns = Math.max(...cellsPerRow.map((cells) => cells.length));
+
+    block.forEach((rowLine, rowOffset) => {
+      const cells = cellsPerRow[rowOffset];
+      if (maxColumns < 2 || cells.length >= maxColumns) {
+        result.push(rowLine);
+        return;
+      }
+      const filler = isMarkdownTableDelimiterLine(rowLine) ? '---' : '';
+      const padded = cells.slice();
+      while (padded.length < maxColumns) padded.push(filler);
+      result.push(formatMarkdownTableRow(padded, markdownTableRowIndent(rowLine)));
+    });
+
+    index = lastIndex + 1;
+  }
+
+  return result;
+}
+
 function normalizeMarkdownTablesForDocx(content) {
   const expandedLines = String(content || '')
     .replace(/\r\n?/g, '\n')
@@ -874,7 +931,7 @@ function normalizeMarkdownTablesForDocx(content) {
     lines.push(line);
   }
 
-  return lines.join('\n');
+  return padMarkdownTableBlocks(lines).join('\n');
 }
 
 function normalizeMarkdownListMarkersForDocx(content) {
@@ -1531,16 +1588,39 @@ async function htmlTableToDocx($, tableNode, context) {
   }).filter((row) => row.cells.length);
   const maxColumns = Math.max(1, ...rowDescriptors.map((row) => row.columnCount));
 
-  // 基于各列文本长度计算更合理的列宽比例（使短内容如“序号”紧凑，长内容充分展开）
+  // Markdown 表格为对齐列数补齐出来的尾部空单元格，不应在 Word 里显示成多余空框：
+  // 直接并入该行最后一个有内容的单元格（等价于跨列），空行则保持原样。
+  for (const row of rowDescriptors) {
+    let lastFilled = row.cells.length - 1;
+    while (
+      lastFilled >= 0
+      && !String(row.cells[lastFilled].text || '').trim()
+      && !$(row.cells[lastFilled].node).children().length
+    ) {
+      lastFilled -= 1;
+    }
+    if (lastFilled < 0 || lastFilled === row.cells.length - 1) continue;
+    row.columnCount -= row.cells.length - 1 - lastFilled;
+    row.cells = row.cells.slice(0, lastFilled + 1);
+  }
+
+  // 基于各列文本长度计算更合理的列宽比例（使短内容如“序号”紧凑，长内容充分展开）。
+  //
+  // 关键：末列单元格会吸收补齐出来的列（见下方渲染逻辑），真实跨度是 effectiveSpan 而不是
+  // columnSpan。只有「真实只占一列」的单元格才算进列宽需求——跨列单元格的文字量不属于任何
+  // 单一列，否则一条跨 3 列的长备注（例如 117 字的“本表后附…”）会把第 2 列撑到全表一半，
+  // 其余各列被压成一条窄缝，导出件里就表现为列宽严重失衡、文字一列一列地竖着排。
   const tableWidthTwips = getPageContentWidthTwips(context);
   const colCharLengths = Array.from({ length: maxColumns }, () => 0);
   for (const row of rowDescriptors) {
     let colIdx = 0;
-    for (const cell of row.cells) {
-      if (cell.columnSpan === 1 && colIdx < maxColumns) {
-        colCharLengths[colIdx] = Math.max(colCharLengths[colIdx], cell.text.length);
+    for (const [cellIndex, cell] of row.cells.entries()) {
+      const remainingSpan = cellIndex === row.cells.length - 1 ? maxColumns - row.columnCount : 0;
+      const effectiveSpan = cell.columnSpan + Math.max(0, remainingSpan);
+      if (effectiveSpan === 1 && colIdx < maxColumns) {
+        colCharLengths[colIdx] = Math.max(colCharLengths[colIdx], String(cell.text || '').trim().length);
       }
-      colIdx += cell.columnSpan;
+      colIdx += Math.max(1, effectiveSpan);
     }
   }
   const colWeights = colCharLengths.map((len) => Math.min(60, Math.max(8, len)));
@@ -1739,8 +1819,51 @@ function isMermaidCodeElement($, codeNode) {
   return /\blanguage-mermaid\b/.test(className) || /\bmermaid\b/.test(className);
 }
 
+/**
+ * 取正文 Markdown 标题的层级范围（只看行首 ATX `#`，跳过围栏代码块内的一行）。
+ * 没有标题时返回 null。
+ */
+function markdownHeadingRange(content) {
+  let min = 0;
+  let max = 0;
+  let inFence = false;
+  for (const rawLine of String(content || '').split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (/^(```|~~~)/.test(line)) { inFence = !inFence; continue; }
+    if (inFence) continue;
+    const match = /^(#{1,6})\s+\S/.exec(line);
+    if (!match) continue;
+    const depth = match[1].length;
+    if (!min || depth < min) min = depth;
+    if (depth > max) max = depth;
+  }
+  return min ? { min, max } : null;
+}
+
+/**
+ * 正文小标题相对 Markdown 原层级要下移几级。
+ *
+ * 目录只收 1-3 级，正文小标题因此至少从 4 级起，避免「本节需人工准备的材料清单」这类
+ * 正文小标题混进目录、也避免 H1 直接跳到 H3 的断档；再按所属小节层级整体下移，
+ * 让更深的小节里的正文标题看起来更靠下。上限用 `6 - 相对深度` 兜住，
+ * 否则正文自己用到两级标题时（`###` + `####`）会被 6 级上限挤成同一级。
+ */
+function contentHeadingOffset(content, level) {
+  const range = markdownHeadingRange(content);
+  if (!range) return 0;
+  const span = range.max - range.min;
+  const targetTop = Math.min(Math.max(level + 3, 4), Math.max(4, 6 - span));
+  return targetTop - range.min;
+}
+
+function contentHeadingLevel(mdLevel, context) {
+  const depth = Math.min(Math.max(Number(mdLevel) || 1, 1), 6);
+  const offset = Number(context?.contentHeadingLevelOffset) || 0;
+  return Math.min(Math.max(depth + offset, 1), 6);
+}
+
 async function htmlHeadingToDocxBlocks($, node, context) {
-  const mdLevel = Math.min(Math.max(parseInt(htmlTagName(node).slice(1), 10) || 1, 1), 6);
+  const mdLevel = contentHeadingLevel(parseInt(htmlTagName(node).slice(1), 10) || 1, context);
   const style = getHeadingStyle(context.exportFormat, mdLevel);
   const headingOpts = {
     heading: headingLevel(mdLevel),
@@ -1875,12 +1998,31 @@ async function htmlToDocxBlocks(html, context = {}, options = {}) {
 
 async function markdownToDocxBlocks(content, context = {}) {
   const markdown = normalizeMarkdownTablesForDocx(normalizeMarkdownListMarkersForDocx(content));
-  const html = await renderMarkdownHtml(markdown, { allowRawHtml: true, enableGfm: true });
+  // breaks: true —— 生成内容按「一行一条」书写，单换行必须保留为换行，
+  // 否则标题/条目会与正文粘成一段（导出件里表现为「一、响应意向与供货范围我方愿按照…」）。
+  const html = await renderMarkdownHtml(markdown, { allowRawHtml: true, enableGfm: true, breaks: true });
   return htmlToDocxBlocks(html, context);
 }
 
 async function addMarkdownContent(children, content, context) {
   children.push(...await markdownToDocxBlocks(content, context));
+}
+
+/** 渲染某个大纲小节的内容，并把正文小标题的层级基准设为该小节的层级。 */
+async function addLeafContent(target, item, context, level) {
+  if (!String(item.content || '').trim()) {
+    const pendingParagraph = buildPendingContentModeParagraph(item);
+    if (pendingParagraph) target.push(pendingParagraph);
+    return;
+  }
+
+  const previousOffset = context.contentHeadingLevelOffset;
+  context.contentHeadingLevelOffset = contentHeadingOffset(item.content, level);
+  try {
+    await addMarkdownContent(target, item.content, context);
+  } finally {
+    context.contentHeadingLevelOffset = previousOffset;
+  }
 }
 
 const FEASIBILITY_ACCENT = '1A5F7A';
@@ -2082,6 +2224,36 @@ function buildFeasibilityAppendixParagraphs(feasibility) {
   ];
 }
 
+/** 目录条目的书签锚点：与标题段落上的书签一一对应，保证目录可点击跳转。 */
+function tocBookmarkName(id) {
+  return `_Toc_${String(id ?? '').replace(/[^0-9A-Za-z_]/g, '_')}`;
+}
+
+/**
+ * 预置目录条目。
+ *
+ * docx 的目录域默认不写缓存结果，Word 要按 F9、预览器则一律显示空白——用户看到的就是「目录为空」。
+ * 这里按大纲生成 1-3 级条目写进域结果，任何阅读器都能立刻看到目录；
+ * 页码留空，由 Word/WPS 打开时按 updateFields 自动刷新为真实页码。
+ */
+function buildTableOfContentsEntries(outline, exportFormat) {
+  const entries = [];
+  const walk = (items, level) => {
+    for (const item of items || []) {
+      if (level <= 3) {
+        entries.push({
+          level,
+          title: formatOutlineTitle(item.id, item.title, getHeadingStyle(exportFormat, level)),
+          href: tocBookmarkName(item.id),
+        });
+      }
+      if (item.children?.length) walk(item.children, level + 1);
+    }
+  };
+  walk(outline, 1);
+  return entries;
+}
+
 function buildOutlineHeadingParagraph(item, context, level, options = {}) {
   const style = getHeadingStyle(context.exportFormat, level);
   const nativeHeadingNumbering = usesNativeHeadingNumbering(style) && !options.manualNumbering && !options.omitNumbering;
@@ -2113,7 +2285,10 @@ function buildOutlineHeadingParagraph(item, context, level, options = {}) {
     paraOptions.numbering = { reference: HEADING_NUMBERING_REFERENCE, level: Math.min(level - 1, 5) };
   }
 
-  return paragraph([textRun(displayTitle, runOptions)], paraOptions);
+  return paragraph(
+    [new Bookmark({ id: tocBookmarkName(item.id), children: [textRun(displayTitle, runOptions)] })],
+    paraOptions,
+  );
 }
 
 async function addChapterFrameRows(rows, items, context, level = 1) {
@@ -2122,12 +2297,7 @@ async function addChapterFrameRows(rows, items, context, level = 1) {
     const useLeafColumns = isLeaf && context.exportFormat?.heading_border?.min_heading_left_enabled === true;
     if (useLeafColumns) {
       const bodyChildren = [];
-      if (String(item.content || '').trim()) {
-        await addMarkdownContent(bodyChildren, item.content, context);
-      } else {
-        const pendingParagraph = buildPendingContentModeParagraph(item);
-        if (pendingParagraph) bodyChildren.push(pendingParagraph);
-      }
+      await addLeafContent(bodyChildren, item, context, level);
       rows.push(buildChapterLeafRow(
         context.exportFormat,
         buildOutlineHeadingParagraph(item, context, level, { compact: true, manualNumbering: true, disablePageBreakBefore: true, omitNumbering: true }),
@@ -2146,14 +2316,9 @@ async function addChapterFrameRows(rows, items, context, level = 1) {
     ));
 
     if (isLeaf) {
-      if (String(item.content || '').trim()) {
-        const bodyChildren = [];
-        await addMarkdownContent(bodyChildren, item.content, context);
-        rows.push(buildChapterContentRow(context.exportFormat, bodyChildren));
-      } else {
-        const pendingParagraph = buildPendingContentModeParagraph(item);
-        if (pendingParagraph) rows.push(buildChapterContentRow(context.exportFormat, [pendingParagraph]));
-      }
+      const bodyChildren = [];
+      await addLeafContent(bodyChildren, item, context, level);
+      rows.push(buildChapterContentRow(context.exportFormat, bodyChildren));
       context.convertedLeafCount = (context.convertedLeafCount || 0) + 1;
       reportConversionProgress(context, `已处理 ${context.convertedLeafCount}/${context.stats?.leafCount || context.convertedLeafCount} 个正文小节。`);
       continue;
@@ -2179,12 +2344,7 @@ async function addOutlineItems(children, items, context, level = 1) {
     children.push(buildOutlineHeadingParagraph(item, context, level));
 
     if (!item.children?.length) {
-      if (String(item.content || '').trim()) {
-        await addMarkdownContent(children, item.content, context);
-      } else {
-        const pendingParagraph = buildPendingContentModeParagraph(item);
-        if (pendingParagraph) children.push(pendingParagraph);
-      }
+      await addLeafContent(children, item, context, level);
       context.convertedLeafCount = (context.convertedLeafCount || 0) + 1;
       reportConversionProgress(context, `已处理 ${context.convertedLeafCount}/${context.stats?.leafCount || context.convertedLeafCount} 个正文小节。`);
       continue;
@@ -2324,6 +2484,29 @@ function buildHeadingParagraphStyles(exportFormat) {
   }
 
   return styles;
+}
+
+/**
+ * 目录条目样式（TOC1–TOC3）。
+ *
+ * docx 生成的缓存目录条目会引用 `TOC{level}` 段落样式；样式缺失时条目会退化成
+ * 正文默认格式，缩进与行距都不像目录。这里按正文口径补齐三级缩进。
+ */
+function buildTocParagraphStyles(exportFormat) {
+  const bodyStyle = exportFormat?.body_text || {};
+  const font = bodyStyle.font || '宋体';
+  const size = chineseSizeToHalfPt(bodyStyle.size || '小四');
+
+  return [1, 2, 3].map((level) => ({
+    id: `TOC${level}`,
+    name: `toc ${level}`,
+    basedOn: 'Normal',
+    run: { font, size, bold: false },
+    paragraph: {
+      spacing: { before: 0, after: 0, line: 240 * (bodyStyle.line_spacing_multiple || 1) },
+      indent: { left: (level - 1) * 240, right: 0, firstLine: 0, hanging: 0 },
+    },
+  }));
 }
 
 function extractFactValue(facts, keywords) {
@@ -2568,15 +2751,21 @@ async function buildDocxResult(payload, options = {}) {
     children.push(...buildFeasibilityNotesParagraphs(payload, feasibility));
   }
 
-  // 目录页（仅非可研导出且开启 include_toc 时插入；Word 中更新目录域即可填充）
+  // 目录页（仅非可研导出且开启 include_toc 时插入）
   if (!feasibility && exportFormat && exportFormat.include_toc !== false) {
+    const tocEntries = buildTableOfContentsEntries(payload.outline || [], exportFormat);
     children.push(
       new Paragraph({
         children: [new TextRun({ text: '目  录', bold: true, size: 32, font: '黑体' })],
         alignment: AlignmentType.CENTER,
         spacing: { before: 240, after: 360 },
       }),
-      new TableOfContents('目录', { hyperlink: true, headingStyleRange: '1-3' }),
+      new TableOfContents('目录', {
+        hyperlink: true,
+        headingStyleRange: '1-3',
+        // 无缓存结果时目录在任何阅读器里都是空白，必须预置条目。
+        ...(tocEntries.length ? { cachedEntries: tocEntries } : {}),
+      }),
       new Paragraph({ children: [new PageBreak()], spacing: { after: 0 } }),
     );
   }
@@ -2626,7 +2815,7 @@ async function buildDocxResult(payload, options = {}) {
   const footers = buildWordFooters(pageSetup, bidMetadata.projectName);
 
   const numbering = createNumberingConfig(context);
-  const headingStyles = buildHeadingParagraphStyles(exportFormat);
+  const headingStyles = [...buildHeadingParagraphStyles(exportFormat), ...buildTocParagraphStyles(exportFormat)];
   const sectionProperties = {
     page: {
       margin: pageMargin,
@@ -2637,6 +2826,8 @@ async function buildDocxResult(payload, options = {}) {
   };
   const doc = new Document({
     ...(numbering ? { numbering } : {}),
+    // 目录域预置了条目但页码留空，打开时让 Word/WPS 自动刷新成真实页码。
+    features: { updateFields: true },
     styles: {
       default: {
         document: {
@@ -2701,6 +2892,23 @@ function createExportService({ configStore } = {}) {
       if (!Array.isArray(payload.outline) || !payload.outline.length) {
         const error = new Error('没有可导出的目录内容');
         developerLogger.write('export.word.error', { error: compactLogError(error) });
+        throw error;
+      }
+
+      // 交付闸门：历史项目事实污染在导出前一律拦截，不能事后靠人工在 Word 里找。
+      const contamination = evaluateContaminationGate(payload.outline, {
+        projectName: resolvedProjectName,
+        packageName: payload.packageName || payload.package_name || '',
+        tenderName: payload.tenderName || payload.tender_name || '',
+      });
+      if (contamination.blocked) {
+        const hits = contamination.details.blockers.slice(0, 5)
+          .map((item) => `「${item.term}」出现在 ${item.section_title || item.section_id || '正文'}`)
+          .join('；');
+        const error = new Error(`${contamination.reason}：${hits}。请清理这些历史项目事实后再导出。`);
+        error.code = 'CROSS_PROJECT_CONTAMINATION';
+        error.details = contamination.details;
+        developerLogger.write('export.word.error', { error: compactLogError(error), blockers: contamination.details.blockers });
         throw error;
       }
 
