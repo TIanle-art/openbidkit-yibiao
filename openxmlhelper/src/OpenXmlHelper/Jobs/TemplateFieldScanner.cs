@@ -112,9 +112,15 @@ static class TemplateFieldScanner
                 }
 
                 if (!IsSimpleEmptyCell(cell, rowTexts[cellIndex])) continue;
+                var context = BuildCellContext(rowTexts, cellIndex);
+                // 同行没有任何文字的空单元格不产生候选。
+                //
+                // 空单元格本身说明不了该填什么，名字只能从同行其它单元格的标签推出来。
+                // 一整行都是空的，就没有任何可判断依据，只会把招标文件自身的空白表格
+                // 全变成噪音——实测一份真实招标文件 408 个候选里有 133 个属于这种。
+                if (context.Length == 0) continue;
                 var targetParagraph = paragraphs.FirstOrDefault();
                 if (targetParagraph is null) continue;
-                var context = BuildCellContext(rowTexts, cellIndex);
                 AddCandidate(
                     candidates,
                     seen,
@@ -145,6 +151,7 @@ static class TemplateFieldScanner
             Wp.SdtBlock block => block.SdtProperties,
             _ => null,
         };
+        if (IsStructuralControl(properties)) return;
         var name = properties?.GetFirstChild<Wp.SdtAlias>()?.Val?.Value?.Trim() ?? "";
         var controlText = WordWorkspace.Normalize(control.InnerText ?? "");
         var context = Limit(controlText, 200);
@@ -161,6 +168,26 @@ static class TemplateFieldScanner
             target: control,
             start: 0,
             length: 0);
+    }
+
+    /// <summary>
+    /// 判断一个已有内容控件是不是「结构性控件」，是则一律不当待填点。
+    ///
+    /// 两类要跳过：
+    /// 1. 带 <c>w:docPartObj</c> 的控件——目录（TOC）这类自动生成的文档部件。
+    ///    它的内容由 Word 自己维护，用占位段落去替换会把整页目录毁掉
+    ///    （实测：目录整页只剩一个占位符，且只写入 w:tag、拿不到 w:alias/w:id）。
+    /// 2. 已经带 <c>yibiao:field:</c> 标记的控件——那是本助手自己写进去的字段。
+    ///    不跳过的话，拿处理过的模板再扫一次会把自己的输出当新候选，越滚越多。
+    /// </summary>
+    static bool IsStructuralControl(Wp.SdtProperties? properties)
+    {
+        if (properties is null) return false;
+        // 按元素本地名判断而不是用强类型：w:docPartObj 在 SDK 里的类名跨版本有差异，
+        // 而这里只关心「是不是文档部件」这一件事。
+        if (properties.ChildElements.Any(child => child.LocalName == "docPartObj")) return true;
+        var tag = properties.GetFirstChild<Wp.Tag>()?.Val?.Value ?? "";
+        return tag.StartsWith(TemplateFieldSdtWriter.TagPrefix, StringComparison.Ordinal);
     }
 
     static void ScanParagraph(
@@ -385,6 +412,20 @@ static class TemplateFieldScanner
         var identity = $"v1\u0000{location}\u0000{kind}\u0000{start}\u0000{length}\u0000{text}\u0000{context}";
         var candidateId = $"c_{Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(identity)))[..16].ToLowerInvariant()}";
         if (!seen.Add(candidateId)) return;
+
+        // 再按「段落 + 字段名」去一次重。
+        //
+        // underlined-space 和 after-label 是两套检测器：对「采购编号：______」
+        // 这种写法，前者命中下划线空位、后者命中行尾标签，指的都是**同一个待填位**，
+        // 推出名字也一样。实测一份真实招标文件里这种重复有 72 个。
+        // 先加入的会保留——underlined-space 在扫描顺序上更早，而且带真实的空位起止位置，
+        // 写入时更有用。
+        //
+        // 代价：同一段落里若真有两个名字完全相同的空位（如「日期：__ 日期：__」），
+        // 会被并成一个。这种情况在这类表单里极少见，且分类环节还能再拆。
+        var nameKey = $"n\u0000{location}\u0000{Limit(suggestedName, 80)}";
+        if (!seen.Add(nameKey)) return;
+
         candidates.Add(new TemplateFieldCandidate
         {
             CandidateId = candidateId,

@@ -254,6 +254,27 @@ async function main() {
       assertion('模板待填候选可扫描', '> 0 个', `${candidates.length} 个`, candidates.length > 0);
       if (candFile) fs.copyFileSync(candFile, path.join(outDir, 'tender-field-candidates.json'));
 
+      // 噪音三项不变量。这三条守的是 2026-09-20 的三处扫描器改动：
+      // 一颗都不许漂回去——否则候选会重新膨胀到 408 个、且目录控件会再被当字段。
+      const structural = candidates.filter((c) => c.kind === 'existing-content-control');
+      assertion('目录等结构性控件不再作为候选', '0 个', `${structural.length} 个`, structural.length === 0,
+        structural.slice(0, 3).map((c) => String(c.text || '').slice(0, 24)).join(' | '));
+
+      const noLabelCells = candidates.filter(
+        (c) => c.kind === 'empty-table-cell' && !String(c.context || '').trim(),
+      );
+      assertion('同行无标签的空单元格不再作为候选', '0 个', `${noLabelCells.length} 个`, noLabelCells.length === 0);
+
+      const paraKey = (c) => String(c.location || '').replace(/\/run\/\d+$/, '');
+      const nameSeen = new Map();
+      for (const c of candidates) {
+        const key = `${paraKey(c)}||${String(c.suggested_name || '').trim()}`;
+        nameSeen.set(key, (nameSeen.get(key) || 0) + 1);
+      }
+      const dupNames = [...nameSeen.values()].filter((n) => n > 1).length;
+      assertion('同段落同字段名不再重复', '0 组', `${dupNames} 组`, dupNames === 0);
+      process.stdout.write(`  候选总数 ${candidates.length}（改动前为 408）\n`);
+
       if (candidates.length > 0) {
         // 助手要求每个候选恰好归入 fields 或 ignored_candidate_ids。
         // 这里只给「有建议名」的前若干候选命名，其余全部忽略——真实流程由模板 Agent 分类。
