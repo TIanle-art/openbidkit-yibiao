@@ -237,6 +237,8 @@ const bridge = {
     update: (templateId, config) => ipcRenderer.invoke('templates:update', templateId, config),
     delete: (templateId) => ipcRenderer.invoke('templates:delete', templateId),
     deriveFromFile: (filePaths) => ipcRenderer.invoke('templates:derive-from-file', filePaths),
+    // 模板待填点自动填值：扫描→分类→抽招标事实→查企业资料库→AI 撰写→原位写入（版式不动）
+    fillTemplateFields: (payload) => ipcRenderer.invoke('templates:fill-template-fields', payload),
   },
   pastBidTemplate: {
     list: () => ipcRenderer.invoke('past-bid-template:list'),

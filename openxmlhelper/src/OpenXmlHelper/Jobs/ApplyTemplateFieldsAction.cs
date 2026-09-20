@@ -69,6 +69,7 @@ static class ApplyTemplateFieldsAction
                         Name = item.Selection.Name,
                         FillBy = item.Selection.FillBy,
                         Instruction = item.Selection.Instruction,
+                        Value = item.Selection.Value,
                     };
                     definitions.Fields.Add(field);
                     applications.Add((item.Candidate, field, nextWordId++));
@@ -131,14 +132,24 @@ static class ApplyTemplateFieldsAction
             Name = (item.Name ?? "").Trim(),
             FillBy = (item.FillBy ?? "").Trim().ToLowerInvariant(),
             Instruction = string.IsNullOrWhiteSpace(item.Instruction) ? null : item.Instruction.Trim(),
+            // 空串与空白一律当成「没值」：写了等于没写，还会把淡红底的待填标记吃掉，
+            // 交付时看不出这格其实还空着。
+            Value = string.IsNullOrWhiteSpace(item.Value) ? null : item.Value,
         }).ToList();
         if (selections.Any(item => item.CandidateId.Length == 0 || item.Name.Length == 0))
         {
             throw new InvalidOperationException("模板字段缺少 candidate_id 或 name");
         }
-        if (selections.Any(item => item.FillBy is not ("ai" or "manual")))
+        // 四类来源的分工很实际：
+        //   copy    = 采购编号/项目名称这类，值在招标文件原文里，照抄；
+        //   profile = 企业资料库（营业执照、财务、业绩台账），取不到就留空；
+        //   manual  = 签字盖章与报价，必须留给人；
+        //   ai      = 项目自述类，才交给模型撰写。
+        // 下游按 fill_by 决定「去哪儿取值」，所以这四类一个都不能合并——
+        // 合并了就等于让模型去编采购编号和报价金额。
+        if (selections.Any(item => item.FillBy is not ("ai" or "manual" or "profile" or "copy")))
         {
-            throw new InvalidOperationException("fill_by 只能是 ai 或 manual");
+            throw new InvalidOperationException("fill_by 只能是 ai、manual、profile 或 copy");
         }
         if (selections.Select(item => item.CandidateId).Distinct(StringComparer.Ordinal).Count() != selections.Count)
         {

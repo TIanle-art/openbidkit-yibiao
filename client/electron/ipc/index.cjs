@@ -20,6 +20,7 @@ const { registerImageLibraryIpc } = require('./imageLibraryIpc.cjs');
 const { registerSystemFontIpc } = require('./systemFontIpc.cjs');
 const { registerPluginIpc } = require('./pluginIpc.cjs');
 const { registerFullFidelityBidIpc } = require('./fullFidelityBidIpc.cjs');
+const { registerTemplateFieldFillIpc } = require('./templateFieldFillIpc.cjs');
 const pluginService = require('../services/pluginService.cjs');
 const { createAgentService } = require('../services/agentService.cjs');
 const { createAiService } = require('../services/aiService.cjs');
@@ -442,6 +443,7 @@ function registerIpcHandlers({ app, mainWindow, checkAndDownloadUpdate, triggerU
   const masterBidDecompositionService = createMasterBidDecompositionService();
   const fullFidelityBidAssemblyService = createFullFidelityBidAssemblyService({ app });
   registerFullFidelityBidIpc({ masterBidDecompositionService, fullFidelityBidAssemblyService });
+  registerTemplateFieldFillIpc({ app, openXmlHelperService, aiService });
   registerPluginIpc(ipcMain, app, {
     agentService,
     taskService: null,

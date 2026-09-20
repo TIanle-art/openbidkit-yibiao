@@ -45,7 +45,7 @@ static class TemplateFieldSdtWriter
         var content = control.SdtContentRun ?? control.AppendChild(new Wp.SdtContentRun());
         var sourceRun = content.Elements<Wp.Run>().FirstOrDefault();
         content.RemoveAllChildren();
-        content.AppendChild(CreatePlaceholderRun(field, sourceRun));
+        content.AppendChild(CreateContentRun(field, sourceRun));
     }
 
     static void UpdateExistingBlockControl(Wp.SdtBlock control, TemplateFieldDefinition field, int wordId)
@@ -66,7 +66,7 @@ static class TemplateFieldSdtWriter
         {
             paragraph.AppendChild((Wp.ParagraphProperties)sourceParagraph.ParagraphProperties.CloneNode(true));
         }
-        paragraph.AppendChild(CreatePlaceholderRun(field, sourceRun));
+        paragraph.AppendChild(CreateContentRun(field, sourceRun));
         content.RemoveAllChildren();
         content.AppendChild(paragraph);
     }
@@ -191,9 +191,44 @@ static class TemplateFieldSdtWriter
             new Wp.SdtAlias { Val = field.Name },
             new Wp.SdtId { Val = wordId },
             new Wp.Tag { Val = $"{TagPrefix}{field.Id}" });
-        var content = new Wp.SdtContentRun(CreatePlaceholderRun(field, sourceRun));
+        var content = new Wp.SdtContentRun(CreateContentRun(field, sourceRun));
         return new Wp.SdtRun(properties, content);
     }
+
+    /// <summary>有真值就写真值，没有就写占位符。两处的底纹故意不同，见各自说明。</summary>
+    static Wp.Run CreateContentRun(TemplateFieldDefinition field, Wp.Run? sourceRun)
+    {
+        return string.IsNullOrEmpty(field.Value)
+            ? CreatePlaceholderRun(field, sourceRun)
+            : CreateValueRun(field, sourceRun);
+    }
+
+    /// <summary>
+    /// 已取到值的控件：写值，并且**不**上淡红底。
+    ///
+    /// 淡红底是「这格还没处理」的标记；填了值还标红，交付时人眼分不清哪些真的空着。
+    /// 颜色也不动——沿用原文 run 的字色，免得一片黑字里冒出异色。
+    /// </summary>
+    static Wp.Run CreateValueRun(TemplateFieldDefinition field, Wp.Run? sourceRun)
+    {
+        var properties = sourceRun?.RunProperties is null
+            ? new Wp.RunProperties()
+            : (Wp.RunProperties)sourceRun.RunProperties.CloneNode(true);
+        properties.RemoveAllChildren<Wp.Shading>();
+        return new Wp.Run(
+            properties,
+            new Wp.Text(field.Value ?? "") { Space = SpaceProcessingModeValues.Preserve });
+    }
+
+    /// <summary>
+    /// 占位符文案长度上限（以字段名为准，超了就退回短标记）。
+    ///
+    /// 占位符是写在原本空着的下划线/空格上的，写长了会把原本一行的落款撑成两行——
+    /// 实测「【人工处理：法定代表人或其授权代理人签字】」20 多个字，直接把响应函的
+    /// 签署行折行，等于改了版式。而字段名本身没丢：它同时写进了 w:alias，
+    /// 在 Word 的内容控件属性、以及 apply 产出的字段清单里都能查到。
+    /// </summary>
+    const int MaxInlineNameLength = 4;
 
     static Wp.Run CreatePlaceholderRun(TemplateFieldDefinition field, Wp.Run? sourceRun)
     {
@@ -211,10 +246,15 @@ static class TemplateFieldSdtWriter
                 Fill = PlaceholderFill,
             },
             throwOnError: true);
-        var prefix = field.FillBy == "manual" ? "人工处理" : "待填写";
+        // 人工签署类一律用短标记：这些字段最终必须由人动手，标记要最显眼；
+        // 其余字段名字短就直接显示名字（可读），名字长才退回「【待填】」。
+        var name = field.Name ?? "";
+        var label = field.FillBy == "manual"
+            ? "【人工】"
+            : (name.Length > 0 && name.Length <= MaxInlineNameLength ? $"【{name}】" : "【待填】");
         return new Wp.Run(
             properties,
-            new Wp.Text($"【{prefix}：{field.Name}】") { Space = SpaceProcessingModeValues.Preserve });
+            new Wp.Text(label) { Space = SpaceProcessingModeValues.Preserve });
     }
 
     static Wp.Run CreateTextRun(string text, Wp.Run sourceRun)

@@ -44,6 +44,12 @@ sealed class TemplateFieldSelection
     [JsonPropertyName("fill_by")]
     public string FillBy { get; set; } = "";
     public string? Instruction { get; set; }
+    /// <summary>
+    /// 要写进控件里的真值。为空表示「还没取到值」，仍写占位符并保留淡红底。
+    /// manual 字段永远不该带值——那是留给人签字盖章的位置。
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? Value { get; set; }
 }
 
 sealed class TemplateFieldDefinitionFile
@@ -60,6 +66,12 @@ sealed class TemplateFieldDefinition
     public string FillBy { get; set; } = "";
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? Instruction { get; set; }
+    /// <summary>
+    /// 实际写进文档的值；null 表示这个控件还是待填状态。
+    /// 写进清单是为了交付时能一眼分清「哪些已填、哪些还空着」。
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? Value { get; set; }
 }
 
 sealed class ScanTemplateFieldsRequest
