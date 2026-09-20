@@ -58,6 +58,7 @@ const SOURCES = [
 ];
 
 const assertions = [];
+const knownLimitations = [];
 
 function assertion(name, expected, actual, pass, note = '') {
   assertions.push({ name, expected: String(expected), actual: String(actual), pass, note });
@@ -231,13 +232,138 @@ async function main() {
       }
     }
 
+    // 5) scan-template-fields + apply-template-fields：在模板上原位写 w:sdt，版式一点不动
+    // OPENXML_TEST_TEMPLATE 可切换用哪份模板跑（默认招标文件；contentTemplate = 历史标书内容模板）
+    const applySourceKey = process.env.OPENXML_TEST_TEMPLATE === 'contentTemplate' ? 'contentTemplate' : 'tender';
+    if (placed[applySourceKey]) {
+      process.stdout.write(`\n[stage] scan-template-fields（模板=${applySourceKey}，找待填点）\n`);
+      const scan = await service.runJob({
+        action: 'scan-template-fields',
+        request: { input: placed[applySourceKey] },
+        timeoutMs: 300_000,
+      });
+      process.stdout.write(`  result: ${JSON.stringify(scan)}\n`);
+      const candFile = findLatestJobFile(jobRoot, 'template-field-candidates.json');
+      const candidates = (candFile && readJsonSafe(candFile)?.candidates) || [];
+      process.stdout.write(`  待填候选 ${candidates.length} 个\n`);
+      for (const c of candidates.slice(0, 14)) {
+        process.stdout.write(
+          `    ${c.candidate_id}  kind=${c.kind}  建议名=${c.suggested_name || '-'}  文=${String(c.text || '').replace(/\s+/g, ' ').slice(0, 34)}\n`,
+        );
+      }
+      assertion('模板待填候选可扫描', '> 0 个', `${candidates.length} 个`, candidates.length > 0);
+      if (candFile) fs.copyFileSync(candFile, path.join(outDir, 'tender-field-candidates.json'));
+
+      if (candidates.length > 0) {
+        // 助手要求每个候选恰好归入 fields 或 ignored_candidate_ids。
+        // 这里只给「有建议名」的前若干候选命名，其余全部忽略——真实流程由模板 Agent 分类。
+        // OPENXML_TEST_KIND 可限定只命名某一类候选，用于二分定位写入器的问题。
+        const kindFilter = String(process.env.OPENXML_TEST_KIND || '').trim();
+        const eligible = kindFilter ? candidates.filter((c) => c.kind === kindFilter) : candidates;
+        // OPENXML_TEST_NOOP=1：一个字段都不命名（全部忽略）。写入器不做任何改动，
+        // 此时若校验仍失败，说明错误来自源文档本身而不是写入器。
+        const noop = process.env.OPENXML_TEST_NOOP === '1';
+        const named = noop ? [] : eligible.filter((c) => String(c.suggested_name || '').trim()).slice(0, 6);
+        process.stdout.write(
+          `  命中类别 ${kindFilter || '(全部)'}，命名 ${named.length} 个`
+          + `${noop ? '（NOOP：全部忽略）' : `：${named.map((c) => c.kind).join(',')}`}\n`,
+        );
+        const fields = named.map((c) => ({
+          candidate_id: c.candidate_id,
+          name: String(c.suggested_name).trim(),
+          fill_by: c.suggested_fill_by === 'manual' ? 'manual' : 'ai',
+        }));
+        const namedIds = new Set(fields.map((f) => f.candidate_id));
+        const ignored = candidates.filter((c) => !namedIds.has(c.candidate_id)).map((c) => c.candidate_id);
+
+        process.stdout.write(`\n[stage] apply-template-fields（命名 ${fields.length} 个，忽略 ${ignored.length} 个）\n`);
+        const applyRel = `${sourceDir}/bid-template-fields.docx`;
+        const fieldsRel = `${sourceDir}/bid-template-fields.json`;
+        let applied = null;
+        let applyError = '';
+        try {
+          applied = await service.runJob({
+            action: 'apply-template-fields',
+            request: {
+              input: placed[applySourceKey],
+              output: applyRel,
+              fields_output: fieldsRel,
+              fields,
+              ignored_candidate_ids: ignored,
+            },
+            timeoutMs: 300_000,
+          });
+        } catch (error) {
+          applyError = String(error?.message || error);
+        }
+        process.stdout.write(`  result: ${applied ? JSON.stringify(applied) : `失败 ${applyError}`}\n`);
+        assertion('原位填字段写入成功', 'ok:true', applied?.ok === true ? 'ok:true' : applyError.slice(0, 160), applied?.ok === true);
+
+        const applyDocx = path.join(isoWorkspace, applyRel);
+        const exists = fs.existsSync(applyDocx);
+        assertion('原位填字段产物已生成', '存在', exists ? `${fs.statSync(applyDocx).size} 字节` : '缺失', exists);
+
+        if (exists) {
+          fs.copyFileSync(applyDocx, path.join(outDir, 'bid-template-fields.docx'));
+          const fieldsFile = path.join(isoWorkspace, fieldsRel);
+          if (fs.existsSync(fieldsFile)) fs.copyFileSync(fieldsFile, path.join(outDir, 'bid-template-fields.json'));
+
+          const out = inspectDocx(applyDocx);
+          const srcParts = inspectDocx(path.join(isoWorkspace, placed[applySourceKey]));
+          // 候选分两类落地：已有内容控件是「原地更新」，其余是「新建 sdt」。
+          const existingCount = named.filter((c) => c.kind === 'existing-content-control').length;
+          const createdCount = fields.length - existingCount;
+          const expectedSdt = srcParts.sdtCount + createdCount;
+          process.stdout.write(
+            `  产物：部件 ${out.names.length}，页眉 ${out.headerParts}，页脚 ${out.footerParts}，`
+            + `sdt ${out.sdtCount}（源 ${srcParts.sdtCount} + 新建 ${createdCount}），`
+            + `字段标签 ${out.fieldTags.length}，底色样本 ${JSON.stringify([...new Set(out.fieldShadings)].slice(0, 3))}\n`,
+          );
+          process.stdout.write(`  字段名：${JSON.stringify(out.fieldAliases.slice(0, 8))}\n`);
+
+          assertion('写入了 w:sdt 内容控件', `= ${expectedSdt} 个`, `${out.sdtCount} 个`, out.sdtCount === expectedSdt);
+          assertion('字段带 yibiao:field 标签', `= ${fields.length} 个`,
+            `${out.fieldTags.filter((t) => t.startsWith('yibiao:field:')).length} 个`,
+            out.fieldTags.filter((t) => t.startsWith('yibiao:field:')).length === fields.length);
+          // 新建的 sdt 才能同时拿到 alias：更新已有的 docPartObj 控件（目录）只落 tag，
+          // 且其原内容会被占位段落替换——真实流程里模板 Agent 会把这类控件归入忽略。
+          const aliasExpected = named
+            .filter((c) => c.kind !== 'existing-content-control')
+            .map((c) => String(c.suggested_name).trim());
+          assertion('新建字段名写入 w:alias',
+            aliasExpected.join('/'),
+            out.fieldAliases.join('/'),
+            aliasExpected.every((name) => out.fieldAliases.includes(name)));
+          assertion('字段用淡红底 FCE8E6 标记', '含 FCE8E6', [...new Set(out.fieldShadings)].join(',') || '无',
+            out.fieldShadings.includes('FCE8E6'));
+          assertion('原位填写不丢部件（版式不动）', `源 ${srcParts.names.length}`,
+            `产物 ${out.names.length}`,
+            out.names.length >= srcParts.names.length);
+          assertion('原位填写不动页眉页脚', `源 ${srcParts.headerParts}/${srcParts.footerParts}`,
+            `产物 ${out.headerParts}/${out.footerParts}`,
+            out.headerParts === srcParts.headerParts && out.footerParts === srcParts.footerParts);
+          assertion('原位填写不动表格数', `源 ${srcParts.tableCount}`, `产物 ${out.tableCount}`,
+            out.tableCount === srcParts.tableCount);
+
+          if (existingCount > 0) {
+            knownLimitations.push(
+              `更新已有的 docPartObj 控件（目录，${existingCount} 个）时只写入 w:tag，不写 w:alias/w:id，`
+              + '且原控件内容会被占位段落替换。真实流程应把这类控件归入 ignored_candidate_ids。',
+            );
+          }
+        }
+      }
+    }
+
     fs.writeFileSync(
       path.join(outDir, 'report.json'),
-      `${JSON.stringify({ generated_at: new Date().toISOString(), isolated_workspace: isoWorkspace, placed, assertions }, null, 2)}\n`,
+      `${JSON.stringify({ generated_at: new Date().toISOString(), isolated_workspace: isoWorkspace, placed, assertions, known_limitations: knownLimitations }, null, 2)}\n`,
       'utf8',
     );
     const passed = assertions.filter((a) => a.pass).length;
-    process.stdout.write(`\n断言：PASS ${passed} / FAIL ${assertions.length - passed}\n报告：${outDir}\n`);
+    process.stdout.write(`\n断言：PASS ${passed} / FAIL ${assertions.length - passed}\n`);
+    for (const item of knownLimitations) process.stdout.write(`已知限制：${item}\n`);
+    process.stdout.write(`报告：${outDir}\n`);
   } finally {
     await service.close().catch(() => {});
   }
@@ -256,8 +382,11 @@ function inspectDocx(file) {
   };
   const documentXml = read('word/document.xml');
   const stylesXml = read('word/styles.xml');
+  const tags = [...documentXml.matchAll(/<w:tag\s+w:val="([^"]*)"/g)].map((m) => m[1]);
+  const aliases = [...documentXml.matchAll(/<w:alias\s+w:val="([^"]*)"/g)].map((m) => m[1]);
   return {
     names,
+    documentXml,
     hasStyles: stylesXml.length > 0,
     styleCount: (stylesXml.match(/<w:style /g) || []).length,
     hasNumbering: names.includes('word/numbering.xml'),
@@ -268,6 +397,10 @@ function inspectDocx(file) {
     hasResponseLetter: documentXml.includes('响应函'),
     hasPoA: documentXml.includes('授权委托书'),
     hasLegalRep: documentXml.includes('法定代表人'),
+    sdtCount: (documentXml.match(/<w:sdt>/g) || []).length,
+    fieldTags: tags,
+    fieldAliases: aliases,
+    fieldShadings: [...documentXml.matchAll(/<w:shd\b[^>]*w:fill="([0-9A-Fa-f]{6})"/g)].map((m) => m[1].toUpperCase()),
   };
 }
 

@@ -35,6 +35,20 @@ static class ApplyTemplateFieldsAction
             tempFieldsPath = $"{fieldsOutputPath}.{Guid.NewGuid():N}.tmp";
             File.Copy(inputPath, tempDocumentPath, overwrite: true);
 
+            // 先在源文件上量一遍校验基线。
+            //
+            // 真实招标/模板文件常带着 Word 能容忍、但严格校验器不接受的历史问题：
+            // 重复的 styleId、非规范的枚举值（如 w:val="start"）、w:pPr 子元素顺序等。
+            // 这些大多来自 WPS / LibreOffice / PDF 转换 / 多文档合并，和「写内容控件」无关。
+            // 直接把源文档的既有问题当失败，会让动作在所有真实文件上都跑不起来
+            // （实测两份不同的真实 docx 都会在这里挂掉，报的还是两套完全不同的错）。
+            // 所以只拦「本次写入新引入的」错误，做法是比对错误签名计数。
+            Dictionary<string, int> baselineValidationCounts;
+            using (var sourceDocument = WordprocessingDocument.Open(inputPath, false))
+            {
+                baselineValidationCounts = CollectValidationSignatureCounts(sourceDocument);
+            }
+
             TemplateFieldDefinitionFile definitions;
             using (var document = WordprocessingDocument.Open(tempDocumentPath, true))
             {
@@ -68,11 +82,11 @@ static class ApplyTemplateFieldsAction
                 }
 
                 mainPart.Document.Save();
-                var validationErrors = new OpenXmlValidator(FileFormatVersions.Microsoft365).Validate(document).Take(10).ToList();
-                if (validationErrors.Count > 0)
+                var introduced = CollectIntroducedValidationErrors(document, baselineValidationCounts);
+                if (introduced.Count > 0)
                 {
-                    var details = string.Join("；", validationErrors.Select(item => item.Description));
-                    throw new InvalidOperationException($"投标模版 Open XML 校验失败：{details}");
+                    var details = string.Join("；", introduced.Take(10));
+                    throw new InvalidOperationException($"投标模版 Open XML 校验失败（写入引入）：{details}");
                 }
             }
 
@@ -158,6 +172,43 @@ static class ApplyTemplateFieldsAction
         }
 
         return selections.Select(item => (candidateMap[item.CandidateId], item)).ToList();
+    }
+
+    /// <summary>
+    /// 把校验错误压成「描述 + 所在部件」的签名并计数。
+    ///
+    /// 刻意不带 XPath：写入字段会让后续元素的路径整体位移，带上路径会让同一批既有
+    /// 问题在前后两次校验里算出不同签名，从而被误判成「新引入」。
+    /// 用计数比对即可覆盖「同样的错误变多了」这种情况。
+    /// </summary>
+    static Dictionary<string, int> CollectValidationSignatureCounts(WordprocessingDocument document)
+    {
+        var counts = new Dictionary<string, int>(StringComparer.Ordinal);
+        foreach (var error in new OpenXmlValidator(FileFormatVersions.Microsoft365).Validate(document))
+        {
+            var key = $"{error.Description}|{error.Part?.Uri}";
+            counts[key] = counts.TryGetValue(key, out var current) ? current + 1 : 1;
+        }
+        return counts;
+    }
+
+    /// <summary>返回超出基线的校验错误（即本次写入真正引入的），格式为「签名 ×数量」。</summary>
+    static List<string> CollectIntroducedValidationErrors(
+        WordprocessingDocument document,
+        Dictionary<string, int> baselineCounts)
+    {
+        var introduced = new List<string>();
+        foreach (var item in CollectValidationSignatureCounts(document))
+        {
+            baselineCounts.TryGetValue(item.Key, out var baseline);
+            var delta = item.Value - baseline;
+            if (delta > 0)
+            {
+                introduced.Add($"{item.Key} ×{delta}");
+            }
+        }
+        introduced.Sort(StringComparer.Ordinal);
+        return introduced;
     }
 
     static bool TryReadRequest(string workspace, string jobId, out ApplyTemplateFieldsRequest request, out string error)
