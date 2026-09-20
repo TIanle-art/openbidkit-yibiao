@@ -59,6 +59,20 @@ const SOURCES = [
 
 const assertions = [];
 const knownLimitations = [];
+const cleanOnExit = [];
+
+/** 收尾清理隔离目录。删不掉也不算失败——那几 MB 无关痛痒，真正的坑是以前那份 535MB 副本。 */
+function cleanupIsolatedDirs() {
+  for (const dir of cleanOnExit) {
+    try {
+      fs.rmSync(dir, { recursive: true, force: true });
+    } catch {
+      /* 忽略：清理失败不影响结论 */
+    }
+  }
+}
+
+process.on('exit', cleanupIsolatedDirs);
 
 function assertion(name, expected, actual, pass, note = '') {
   assertions.push({ name, expected: String(expected), actual: String(actual), pass, note });
@@ -74,14 +88,57 @@ function readJsonSafe(file) {
   }
 }
 
+function escapeRegExp(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/**
+ * 名字是否能在上下文里找到「标签依据」。
+ *
+ * 判据是名字在上下文里以某一种标签形态出现：
+ *   ① 后面跟冒号——「采购编号：▁▁」
+ *   ② 被一对括号包着——「▁▁（谈判日期）」
+ *   ③ 就是本列的表头——「本列表头：编列内容」
+ *   ④ 紧跟在「第N列：」后面——表格同行标签
+ *   ⑤ 形如「列名（行标签）」的合成名，两段各自成立即可
+ *
+ * 反例（改动前会通过不了）：名字「你方在」来自句子开头，上下文里虽然出现，
+ * 但既不跟冒号也不在括号里，也不是表头，因此被判为凭空截取。
+ */
+function isAnchoredName(name, context) {
+  const flat = (s) => String(s || '').replace(/\s+/g, '');
+  const nm = flat(name).trim();
+  if (!nm) return true;
+  if (/^第\d+列$/.test(nm)) return false;
+
+  const ctx = flat(context);
+  if (ctx.includes(`${nm}：`) || ctx.includes(`${nm}:`)) return true;
+  if (ctx.includes(`（${nm}）`) || ctx.includes(`(${nm})`)) return true;
+  if (ctx.includes(`本列表头：${nm}`)) return true;
+  if (new RegExp(`第\\d+列：${escapeRegExp(nm)}`).test(ctx)) return true;
+
+  const combo = /^(.+?)（(.+)）$/.exec(String(name).trim());
+  if (combo) {
+    return isAnchoredName(combo[1], context) || isAnchoredName(combo[2], context);
+  }
+  return false;
+}
+
 async function main() {
   const { app } = require('electron');
   if (!app?.setPath) throw new Error('必须在 Electron 主进程下运行');
 
-  const realUserData = path.join(process.env.APPDATA || '', 'yibiao-client');
   const iso = fs.mkdtempSync(path.join(os.tmpdir(), 'openxml-helper-'));
   const isoWorkspace = path.join(iso, 'workspace');
-  fs.cpSync(path.join(realUserData, 'workspace'), isoWorkspace, { recursive: true });
+  // 隔离 workspace 只需要一个空目录。
+  //
+  // 以前这里把 %APPDATA%/yibiao-client/workspace 整个复制过来（约 535MB，含图片库、
+  // 知识库、历史模板、mermaid 缓存），但助手只按「工作区相对路径」解析我们传进去的
+  // 那几份 docx，别的目录一概不读（服务侧只用 getWorkspaceDir(app)，不碰数据库）。
+  // 实测连跑十几次就把 C 盘写满——一次 ENOSPC 直接让脚本连第一行输出都写不出来。
+  // 现在改成空目录 + 收尾自清，单次占用降到几 MB。
+  fs.mkdirSync(isoWorkspace, { recursive: true });
+  cleanOnExit.push(iso);
 
   // 把待验证的 docx 拷进隔离 workspace（助手只接受 workspace 相对路径）
   const sourceDir = 'diag-sources';
@@ -265,15 +322,55 @@ async function main() {
       );
       assertion('同行无标签的空单元格不再作为候选', '0 个', `${noLabelCells.length} 个`, noLabelCells.length === 0);
 
-      const paraKey = (c) => String(c.location || '').replace(/\/run\/\d+$/, '');
+      // 去重口径同步实现：表格按「行」、段落按「段」，且空名字不参与按名去重
+      // （否则同一范围里几个都叫不出名字的候选会被并成一个，那是丢信息）。
+      const dupScope = (c) => (c.kind === 'empty-table-cell'
+        ? String(c.location || '').replace(/\/cell\/\d+\/p\/\d+$/, '')
+        : String(c.location || '').replace(/\/run\/\d+$/, ''));
       const nameSeen = new Map();
       for (const c of candidates) {
-        const key = `${paraKey(c)}||${String(c.suggested_name || '').trim()}`;
+        const name = String(c.suggested_name || '').trim();
+        if (!name) continue;
+        const key = `${dupScope(c)}||${name}`;
         nameSeen.set(key, (nameSeen.get(key) || 0) + 1);
       }
       const dupNames = [...nameSeen.values()].filter((n) => n > 1).length;
-      assertion('同段落同字段名不再重复', '0 组', `${dupNames} 组`, dupNames === 0);
-      process.stdout.write(`  候选总数 ${candidates.length}（改动前为 408）\n`);
+      assertion('同一范围内同字段名不再重复', '0 组', `${dupNames} 组`, dupNames === 0);
+
+      // 命名质量四条不变量。
+      //
+      // 这一组守的是「名字必须是真标签」这个性质。改动前扫描器在取不到标签时会
+      // 「按标点切段取最后一段」兜底，产出一批散文碎片——「你方在」「我方已经仔细阅读」
+      // 「若成交我方将以此作为提供第」之类，实测 20 多个，会把模板分类直接带偏。
+      // 现在取不到就留空，因此下面这几条都能守住。
+      const named = candidates.filter((c) => String(c.suggested_name || '').trim());
+      const pureColumn = named.filter((c) => /^第\d+列$/.test(String(c.suggested_name).trim()));
+      assertion('没有「第N列」这类纯列号名字', '0 个', `${pureColumn.length} 个`, pureColumn.length === 0,
+        pureColumn.slice(0, 3).map((c) => String(c.suggested_name)).join(' | '));
+
+      const tooLong = named.filter((c) => String(c.suggested_name).trim().length > 20);
+      assertion('名字长度不超过 20 字', '0 个', `${tooLong.length} 个`, tooLong.length === 0,
+        tooLong.slice(0, 2).map((c) => `${String(c.suggested_name).slice(0, 30)}…(${String(c.suggested_name).length})`).join(' | '));
+
+      // 字段名不会带逗号句号分号，带上就说明它是从句子里截出来的。
+      // 顿号「、」不算：它是枚举分隔符，「组织机构、技术力量等」这样的一串名词
+      // 本身就是合法的提示语（原文档里就写在括号里）。
+      const sentenceLike = named.filter((c) => /[，。；]/.test(String(c.suggested_name)));
+      assertion('名字不含句子标点', '0 个', `${sentenceLike.length} 个`, sentenceLike.length === 0,
+        sentenceLike.slice(0, 3).map((c) => String(c.suggested_name)).join(' | '));
+
+      // 核心一条：每个名字都必须能在上下文里以「标签形态」找到落脚点——
+      // 地名前有冒号、被括号包着、是表头列名、或紧跟在「第N列：」后面。
+      // 找不到就说明它是凭空截出来的碎片。
+      const unanchored = named.filter((c) => !isAnchoredName(c.suggested_name, c.context));
+      const namedRatio = candidates.length ? ((named.length / candidates.length) * 100).toFixed(0) : '0';
+      assertion('每个名字都能在上下文里找到标签依据', '0 个', `${unanchored.length} 个`, unanchored.length === 0,
+        unanchored.slice(0, 4).map((c) => `${String(c.suggested_name)} ← ${String(c.context).slice(0, 34)}`).join(' | '));
+
+      process.stdout.write(
+        `  候选总数 ${candidates.length}（改动前为 408）；有名字 ${named.length} 个（${namedRatio}%）、`
+        + `空名 ${candidates.length - named.length} 个（取不到可靠标签就留空，交由分类环节判断）\n`,
+      );
 
       if (candidates.length > 0) {
         // 助手要求每个候选恰好归入 fields 或 ignored_candidate_ids。
