@@ -1,6 +1,5 @@
 import { Profiler, startTransition, useEffect, useLayoutEffect, useMemo, useRef, useState, type DragEvent, type ReactNode } from 'react';
 import * as Dialog from '@radix-ui/react-dialog';
-import { trackPageView } from '../../../shared/analytics/analytics';
 import { AppDialog, InlineSpinner, isLibreOfficeRequiredMessage, MarkdownFullscreenViewer, MarkdownRenderer, ProgressBar, useDocumentParseNotice, useToast } from '../../../shared/ui';
 import type { KnowledgeAnalysisSnapshot, KnowledgeBaseIndex, KnowledgeDocument, KnowledgeItem } from '../types';
 
@@ -345,10 +344,6 @@ function KnowledgeBasePage() {
   }, [index.documents]);
   const documents = activeFolder ? documentsByFolder.get(activeFolder.id) || emptyDocuments : emptyDocuments;
   const visibleDocuments = documents.slice(0, Math.min(visibleDocumentCount, documents.length));
-
-  useEffect(() => {
-    trackPageView(viewer ? `knowledge-base/viewer/${viewer.mode}` : 'knowledge-base/library');
-  }, [viewer?.mode]);
 
   useEffect(() => {
     void loadInitialData();
@@ -1426,7 +1421,7 @@ function KnowledgeAnalysisView({ document, snapshot, startingMatching, onStartMa
         <StatCard label="筛除 block" value={snapshot?.filtered_blocks_count ?? document.filtered_block_count ?? 0} />
         <StatCard label="候选条目" value={snapshot?.candidate_items.length ?? document.candidate_item_count ?? 0} />
         <StatCard label="最终条目" value={report?.final_items_count ?? document.item_count ?? 0} />
-        <StatCard label="覆盖率" value={report ? `${Math.round(report.coverage_rate * 100)}%` : '-'} />
+        <StatCard label="有效匹配率" value={report ? `${Math.round(report.coverage_rate * 100)}%` : '-'} />
         <StatCard label="补漏新增" value={report?.new_items_from_recovery_count ?? 0} />
         <StatCard label="Markdown 字符" value={formatInteger(snapshot?.markdown_chars)} />
         <StatCard label="保留 block 字符" value={formatInteger(snapshot?.kept_block_chars)} />

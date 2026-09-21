@@ -8,6 +8,31 @@ import type { FeasibilityProjectInfo, FeasibilityReportState, FeasibilityReportS
 import type { ExportFormatConfig, ExportTemplateRecord } from './exportFormat';
 import type { OutlineData, OutlineExpansionMode, OutlineMode, OutlineWordControlOptions } from './outline';
 
+export interface BidTemplateChapter {
+  level: number;
+  title: string;
+  note?: string;
+  points?: string[];
+  placeholder?: string;
+  role?: 'technical' | 'commercial' | 'qualification' | 'service' | string;
+  children?: BidTemplateChapter[];
+}
+
+export interface BidTemplateSkeleton {
+  version: number;
+  source_kind?: string;
+  chapters: BidTemplateChapter[];
+}
+
+export interface PastBidTemplateRecord {
+  template_id: string;
+  template_name: string;
+  source_file_names: string[];
+  skeleton: BidTemplateSkeleton | null;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface TaskEventTask {
   task_id: string;
   type: string;
@@ -19,6 +44,7 @@ export interface TaskEventTask {
   updated_at: string;
   error?: string;
   stats?: unknown;
+  result?: unknown;
 }
 
 export interface TaskEvent<TState = unknown, TRejectionCheckState = unknown, TDuplicateCheckState = unknown> {
@@ -35,6 +61,51 @@ export interface TaskEvent<TState = unknown, TRejectionCheckState = unknown, TDu
   duplicateCheck?: TDuplicateCheckState;
   duplicateCheckPatch?: DuplicateCheckWorkspacePatch;
   feasibilityReportPatch?: Partial<FeasibilityReportState>;
+}
+
+export interface ImageLibraryFolder {
+  folderId: string;
+  name: string;
+  sortOrder: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ImageLibraryImage {
+  imageId: string;
+  folderId: string;
+  fileName: string;
+  name: string | null;
+  asset_url: string;
+  mime: string | null;
+  ext: string | null;
+  byteSize: number;
+  width: number | null;
+  height: number | null;
+  sourceDocumentId: string | null;
+  contentHash: string | null;
+  originalName: string | null;
+  description: string | null;
+  tags: string | null;
+  metadataStatus: 'pending' | 'processing' | 'ready' | 'failed';
+  metadataError: string | null;
+  metadataUpdatedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ImageLibraryDocumentImage {
+  imageId: string;
+  documentId: string;
+  sourceFileName: string;
+  documentName: string;
+  batchId: string;
+  asset_url: string;
+  file_name: string;
+  mime: string | null;
+  ext: string | null;
+  byteSize: number;
+  createdAt: string;
 }
 
 export interface WordExportProgressEvent {
@@ -488,6 +559,47 @@ export interface AgentSelfCheckReportExportResult {
   message: string;
 }
 
+/** 模板填写逐章节进度事件：串行 AI 请求必须可见，否则界面看起来就是无响应。 */
+export interface TemplateFillProgress {
+  phase: 'start' | 'section' | 'done';
+  /** 已处理的章节数（phase=section 时为当前章节序号）。 */
+  index: number;
+  /** 需要填写的章节总数。 */
+  total: number;
+  /** 当前章节标题（phase=section 时有值）。 */
+  title?: string;
+  filled: number;
+  failed: number;
+  canceled?: boolean;
+}
+
+export interface TemplateFillResult {
+  status: 'skipped' | 'partial' | 'error' | 'success' | 'canceled' | 'busy';
+  message?: string;
+  filled: number;
+  skipped: number;
+  failed?: number;
+  errors?: string[];
+  /** 是否拿到了 Step02 解析结果或全局事实。 */
+  facts_available?: boolean;
+  /** 本次使用的参考知识库文档数。 */
+  knowledge_documents?: number;
+  /** 知识库读取到的参考资料数；为 0 时合规章节只能输出待补充内容。 */
+  knowledge_references?: number;
+  /** 检索到知识库素材的章节数。 */
+  evidence_section_count?: number;
+  /** 完全没检索到知识库素材、已要求写「待补充」的章节标题。 */
+  no_evidence_sections?: string[];
+  /** 需要填写的章节总数。 */
+  total_sections?: number;
+  /** 本次实际处理（含失败）的章节数；取消时会小于总数。 */
+  processed_sections?: number;
+  /** 是否被用户取消。 */
+  canceled?: boolean;
+  /** 主进程侧耗时，用于判断是不是模型过慢。 */
+  elapsed_ms?: number;
+}
+
 export interface YibiaoBridge {
   appName: string;
   platform: string;
@@ -623,6 +735,9 @@ export interface YibiaoBridge {
     saveGlobalFactsConfig: (payload: { globalFactsMode: GlobalFactsMode }) => Promise<Partial<TechnicalPlanState>>;
     saveGlobalFacts: (globalFacts: GlobalFactGroupState[]) => Promise<Partial<TechnicalPlanState>>;
     saveContentGenerationOptions: (options: ContentGenerationOptions) => Promise<Partial<TechnicalPlanState>>;
+    runTemplateFill: () => Promise<TemplateFillResult>;
+    cancelTemplateFill: () => Promise<{ canceled: boolean; message: string }>;
+    onTemplateFillProgress: (callback: (progress: TemplateFillProgress) => void) => () => void;
     saveChapterContent: (payload: { nodeId: string; content: string }) => Promise<Partial<TechnicalPlanState>>;
     clear: () => Promise<{ success: boolean; message?: string }>;
     openBidTemplate: () => Promise<{ success: boolean; message?: string }>;
@@ -658,12 +773,59 @@ export interface YibiaoBridge {
     updateState: (partial: RejectionCheckWorkspacePatch) => Promise<void>;
     clear: () => Promise<{ success: boolean; message?: string }>;
   };
+  imageLibrary: {
+    listFolders: () => Promise<ImageLibraryFolder[]>;
+    createFolder: (name: string) => Promise<ImageLibraryFolder>;
+    renameFolder: (folderId: string, name: string) => Promise<ImageLibraryFolder>;
+    deleteFolder: (folderId: string) => Promise<{ success: boolean }>;
+    listImages: (folderId?: string) => Promise<ImageLibraryImage[]>;
+    uploadImages: (folderId: string, filePaths?: string[]) => Promise<{ success: boolean; images: ImageLibraryImage[]; count: number; message?: string }>;
+    deleteImage: (imageId: string) => Promise<{ success: boolean }>;
+    deleteImages: (imageIds: string[]) => Promise<{ success: boolean; count: number }>;
+    moveImage: (imageId: string, folderId: string) => Promise<ImageLibraryImage>;
+    renameImage: (imageId: string, name: string) => Promise<ImageLibraryImage>;
+    updateImageMeta: (imageId: string, meta: { name?: string; description?: string; tags?: string }) => Promise<ImageLibraryImage>;
+    describeImages: (imageIds: string[]) => Promise<{ success: boolean; successCount: number; failedCount: number; images: ImageLibraryImage[] }>;
+    listDocumentImages: () => Promise<ImageLibraryDocumentImage[]>;
+    importDocumentImages: (documentImageIds: string[], folderId: string) => Promise<{ success: boolean; images: ImageLibraryImage[]; count: number; message?: string }>;
+  };
   templates: {
     list: () => Promise<ExportTemplateRecord[]>;
     get: (templateId: string) => Promise<ExportTemplateRecord | null>;
     create: (config: ExportFormatConfig) => Promise<ExportTemplateRecord>;
     update: (templateId: string, config: ExportFormatConfig) => Promise<ExportTemplateRecord>;
     delete: (templateId: string) => Promise<{ success: boolean; message: string }>;
+    deriveFromFile: (filePaths?: string[]) => Promise<{
+      success: boolean;
+      message?: string;
+      fileName?: string;
+      config?: ExportFormatConfig;
+      summary?: {
+        paper: string;
+        marginsCm: number[];
+        headingFont?: string;
+        headingSize?: string;
+        bodyFont?: string;
+        bodySize?: string;
+        derivedHeadingLevels: number;
+        note?: string;
+      };
+    }>;
+  };
+  pastBidTemplate: {
+    list: () => Promise<PastBidTemplateRecord[]>;
+    get: (templateId: string) => Promise<PastBidTemplateRecord | null>;
+    create: (input: {
+      template_name: string;
+      source_file_names?: string[];
+      skeleton?: BidTemplateSkeleton;
+      source_markdowns?: Record<string, string>;
+    }) => Promise<PastBidTemplateRecord>;
+    delete: (templateId: string) => Promise<{ success: boolean; message: string }>;
+    readSource: (templateId: string, fileName: string) => Promise<string | null>;
+    startExtract: (filePaths?: string[]) => Promise<{ success: boolean; message?: string; task_id?: string }>;
+    saveMarkdown: (payload: { suggested_name?: string; content: string }) => Promise<{ success: boolean; message?: string; path?: string }>;
+    exportWord: (payload: { suggested_name?: string; skeleton: BidTemplateSkeleton; template_id?: string }) => Promise<{ success: boolean; message?: string; path?: string }>;
   };
   tasks: {
     startBidSectionExtraction: (payload?: unknown) => Promise<unknown>;
@@ -689,6 +851,12 @@ export interface YibiaoBridge {
     exportWord: (payload: unknown) => Promise<WordExportResult>;
     openFile: (filePath: string) => Promise<{ success: boolean }>;
     onWordExportProgress: (callback: (event: WordExportProgressEvent) => void) => () => void;
+  };
+  fullFidelityBid: {
+    decomposeMaster: (masterDocxPath: string) => Promise<FullFidelityBidDecomposeResult>;
+    assembleBid: (payload: FullFidelityBidAssemblePayload) => Promise<FullFidelityBidAssembleResult>;
+    assembleSadingBid: (payload: { masterDocxPath: string; outputPath: string }) => Promise<FullFidelityBidAssembleResult>;
+    assembleGuaguiBid: (payload: { masterDocxPath: string; outputPath: string }) => Promise<FullFidelityBidAssembleResult>;
   };
   systemFonts: {
     list: () => Promise<string[]>;
@@ -744,3 +912,63 @@ export interface AvailablePlugin {
     message: string;
   };
 }
+
+export interface FullFidelityBidTenderFacts {
+  buyerName?: string;
+  projectName?: string;
+  procurementNo?: string;
+  packageName?: string;
+  bidderName?: string;
+  bidDate?: string;
+}
+
+export interface FullFidelityBidDeviationRow {
+  itemNo: string;
+  tenderClause: string;
+  tenderReq: string;
+  bidResp: string;
+  deviation: string;
+  note?: string;
+}
+
+export interface FullFidelityBidBomRow {
+  itemNo: string;
+  partName: string;
+  model: string;
+  manufacturer: string;
+  origin: string;
+  note?: string;
+}
+
+export interface FullFidelityBidAssemblePayload {
+  masterDocxPath: string;
+  tenderFacts?: FullFidelityBidTenderFacts;
+  deviationRows?: FullFidelityBidDeviationRow[];
+  bomRows?: FullFidelityBidBomRow[];
+  outputPath: string;
+}
+
+export interface FullFidelityBidAssembleResult {
+  success: boolean;
+  outputPath: string;
+  fileSizeBytes: number;
+  fileSizeMb: number;
+  mediaCount: number;
+  tableCount: number;
+  replacedDeviation: boolean;
+  replacedBom: boolean;
+  tenderFacts: FullFidelityBidTenderFacts;
+}
+
+export interface FullFidelityBidDecomposeResult {
+  fileSizeBytes: number;
+  mediaStats: {
+    totalCount: number;
+    totalSizeBytes: number;
+    types: Record<string, number>;
+  };
+  tablesCount: number;
+  chaptersCount: number;
+  tableCategories: Record<string, number>;
+}
+

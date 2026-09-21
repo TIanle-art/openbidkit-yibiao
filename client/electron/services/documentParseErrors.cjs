@@ -27,9 +27,33 @@ function createLibreOfficeMissingError(error, filePath) {
   return next;
 }
 
+const MINERU_VERSION_MISMATCH_MESSAGE = 'MinerU 云端服务当前版本不匹配（API 与 Worker 版本不一致），通常是 MinerU 临时故障。请稍后重试；或在「设置 → 文件解析」把文件解析方式切换到「本地解析」再导入。';
+
+function isMineruVersionMismatchError(error) {
+  return /does not match the worker version/i.test(String(error?.message || ''));
+}
+
+function createMineruVersionMismatchError(error, filePath) {
+  const next = new Error(MINERU_VERSION_MISMATCH_MESSAGE);
+  next.name = error?.name || 'DocumentParseError';
+  next.code = 'mineru_version_mismatch';
+  next.details = {
+    ...(error?.details || {}),
+    filePath,
+    originalMessage: error?.message || '',
+  };
+  if (error?.stack) {
+    next.stack = error.stack;
+  }
+  return next;
+}
+
 function normalizeDocumentParseError(error, filePath) {
   if (isLegacyOfficeFile(filePath) && isLibreOfficeMissingError(error)) {
     return createLibreOfficeMissingError(error, filePath);
+  }
+  if (isMineruVersionMismatchError(error)) {
+    return createMineruVersionMismatchError(error, filePath);
   }
   return error;
 }

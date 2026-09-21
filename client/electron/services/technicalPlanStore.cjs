@@ -354,6 +354,7 @@ function flattenOutlineItems(items, parentNodeId = null, level = 1, rows = []) {
       content_mode_note: item?.children?.length || item?.content_mode !== 'other' ? null : String(item?.content_mode_note || '').trim() || null,
       source_requirement_id: item?.source_requirement_id ? String(item.source_requirement_id) : null,
       source_requirement_title: item?.source_requirement_title ? String(item.source_requirement_title) : null,
+      technical_topic_ids_json: Array.isArray(item?.technical_topic_ids) && item.technical_topic_ids.length ? JSON.stringify(item.technical_topic_ids) : null,
       knowledge_item_ids_json: Array.isArray(item?.knowledge_item_ids) && item.knowledge_item_ids.length ? JSON.stringify(item.knowledge_item_ids) : null,
       content: String(item?.content || ''),
     });
@@ -914,10 +915,28 @@ function createTechnicalPlanStore({ app, db, fileService, agentService, taskLogS
   }
 
   function replaceReferenceDocumentIds(documentIds) {
-    db.prepare('DELETE FROM technical_plan_reference_docs').run();
-    const insert = db.prepare('INSERT INTO technical_plan_reference_docs (document_id, sort_order) VALUES (@document_id, @sort_order)');
-    [...new Set((Array.isArray(documentIds) ? documentIds : []).map((id) => String(id || '').trim()).filter(Boolean))]
-      .forEach((documentId, index) => insert.run({ document_id: documentId, sort_order: index }));
+    const ids = [...new Set((Array.isArray(documentIds) ? documentIds : []).map((id) => String(id || '').trim()).filter(Boolean))];
+    const findDocument = db.prepare('SELECT document_id, revision, markdown_hash FROM knowledge_documents WHERE document_id = ?');
+    const insert = db.prepare(`
+      INSERT INTO technical_plan_reference_docs (document_id, document_revision, markdown_hash, sort_order, created_at)
+      VALUES (@document_id, @document_revision, @markdown_hash, @sort_order, @created_at)
+    `);
+    const transaction = db.transaction(() => {
+      db.prepare('DELETE FROM technical_plan_reference_docs').run();
+      const timestamp = now();
+      ids.forEach((documentId, index) => {
+        const document = findDocument.get(documentId);
+        if (!document) return;
+        insert.run({
+          document_id: document.document_id,
+          document_revision: Math.max(1, Number(document.revision || 1)),
+          markdown_hash: document.markdown_hash || null,
+          sort_order: index,
+          created_at: timestamp,
+        });
+      });
+    });
+    transaction();
   }
 
   function taskFromRow(row) {
@@ -1084,6 +1103,57 @@ function createTechnicalPlanStore({ app, db, fileService, agentService, taskLogS
     return Math.round((done / selectedIds.length) * 100);
   }
 
+  function loadPlanningSingleton(tableName, jsonColumn) {
+    const row = db.prepare(`SELECT ${jsonColumn} AS payload FROM ${tableName} WHERE id = 1`).get();
+    return row ? safeJsonParse(row.payload, undefined) : undefined;
+  }
+
+  function replacePlanningSingleton(tableName, jsonColumn, value, extra = {}) {
+    if (value === undefined || value === null) {
+      db.prepare(`DELETE FROM ${tableName} WHERE id = 1`).run();
+      return;
+    }
+    const timestamp = now();
+    if (tableName === 'technical_plan_bid_plan') {
+      db.prepare(`
+        INSERT INTO technical_plan_bid_plan (id, schema_version, plan_json, created_at, updated_at)
+        VALUES (1, @schema_version, @payload, @timestamp, @timestamp)
+        ON CONFLICT(id) DO UPDATE SET schema_version = excluded.schema_version, plan_json = excluded.plan_json, updated_at = excluded.updated_at
+      `).run({ schema_version: Number(extra.schemaVersion || value.schema_version || 1), payload: JSON.stringify(value), timestamp });
+      return;
+    }
+    db.prepare(`
+      INSERT INTO ${tableName} (id, ${jsonColumn}, updated_at)
+      VALUES (1, @payload, @timestamp)
+      ON CONFLICT(id) DO UPDATE SET ${jsonColumn} = excluded.${jsonColumn}, updated_at = excluded.updated_at
+    `).run({ payload: JSON.stringify(value), timestamp });
+  }
+
+  function loadResponseTables() {
+    return db.prepare('SELECT table_type, table_json FROM technical_plan_response_tables ORDER BY table_type ASC').all()
+      .reduce((result, row) => {
+        result[row.table_type] = safeJsonParse(row.table_json, undefined);
+        return result;
+      }, {});
+  }
+
+  function replaceResponseTables(value) {
+    db.prepare('DELETE FROM technical_plan_response_tables').run();
+    if (!value || typeof value !== 'object') return;
+    const insert = db.prepare('INSERT INTO technical_plan_response_tables (table_type, table_json, updated_at) VALUES (?, ?, ?)');
+    const timestamp = now();
+    for (const [type, table] of Object.entries(value)) {
+      if (table) insert.run(type, JSON.stringify(table), timestamp);
+    }
+  }
+
+  function clearPlanningArtifacts() {
+    db.prepare('DELETE FROM technical_plan_bid_plan').run();
+    db.prepare('DELETE FROM technical_plan_response_tables').run();
+    db.prepare('DELETE FROM technical_plan_parameter_registry').run();
+    db.prepare('DELETE FROM technical_plan_quality_check').run();
+  }
+
   function loadOutlineData(meta) {
     const rows = db.prepare('SELECT * FROM technical_plan_outline_nodes ORDER BY level ASC, parent_node_id ASC, sort_order ASC').all();
     if (!rows.length) return null;
@@ -1098,6 +1168,7 @@ function createTechnicalPlanStore({ app, db, fileService, agentService, taskLogS
         content_mode_note: row.content_mode_note || undefined,
         source_requirement_id: row.source_requirement_id || undefined,
         source_requirement_title: row.source_requirement_title || undefined,
+        technical_topic_ids: safeJsonParse(row.technical_topic_ids_json, undefined),
         knowledge_item_ids: safeJsonParse(row.knowledge_item_ids_json, undefined),
         content: row.content || '',
         children: [],
@@ -1122,6 +1193,7 @@ function createTechnicalPlanStore({ app, db, fileService, agentService, taskLogS
         item.children.forEach(cleanup);
       }
       if (!item.knowledge_item_ids?.length) delete item.knowledge_item_ids;
+      if (!item.technical_topic_ids?.length) delete item.technical_topic_ids;
       if (!item.content) delete item.content;
       return item;
     }
@@ -1145,10 +1217,10 @@ function createTechnicalPlanStore({ app, db, fileService, agentService, taskLogS
     const upsert = db.prepare(`
       INSERT INTO technical_plan_outline_nodes (
         node_id, parent_node_id, sort_order, level, title, description, content_mode, content_mode_note, source_requirement_id,
-        source_requirement_title, knowledge_item_ids_json, content, created_at, updated_at
+        source_requirement_title, technical_topic_ids_json, knowledge_item_ids_json, content, created_at, updated_at
       ) VALUES (
         @node_id, @parent_node_id, @sort_order, @level, @title, @description, @content_mode, @content_mode_note, @source_requirement_id,
-        @source_requirement_title, @knowledge_item_ids_json, @content, @created_at, @updated_at
+        @source_requirement_title, @technical_topic_ids_json, @knowledge_item_ids_json, @content, @created_at, @updated_at
       ) ON CONFLICT(node_id) DO UPDATE SET
         parent_node_id = excluded.parent_node_id,
         sort_order = excluded.sort_order,
@@ -1159,6 +1231,7 @@ function createTechnicalPlanStore({ app, db, fileService, agentService, taskLogS
         content_mode_note = excluded.content_mode_note,
         source_requirement_id = excluded.source_requirement_id,
         source_requirement_title = excluded.source_requirement_title,
+        technical_topic_ids_json = excluded.technical_topic_ids_json,
         knowledge_item_ids_json = excluded.knowledge_item_ids_json,
         content = excluded.content,
         updated_at = excluded.updated_at
@@ -1341,6 +1414,7 @@ function createTechnicalPlanStore({ app, db, fileService, agentService, taskLogS
       section_ids_json: JSON.stringify(Array.isArray(item.section_ids) ? item.section_ids : []),
       placement: String(item.placement || 'after'),
       priority: Number(item.priority || 0),
+      asset_id: item?.kind === 'asset' && item?.asset_id ? String(item.asset_id) : null,
       generation_status: generation?.status ? String(generation.status) : null,
       generation_mode: generation?.mode ? String(generation.mode) : null,
       generation_code: generation?.code ? String(generation.code) : null,
@@ -1356,12 +1430,12 @@ function createTechnicalPlanStore({ app, db, fileService, agentService, taskLogS
 
   const upsertIllustrationItem = db.prepare(`
     INSERT INTO technical_plan_illustration_items (
-      item_id, kind, image_type, title, section_ids_json, placement, priority,
+      item_id, kind, image_type, title, section_ids_json, placement, priority, asset_id,
       generation_status, generation_mode, generation_code, generation_source_path,
       generation_asset_url, generation_attempts, generation_error, generation_updated_at,
       sort_order, updated_at
     ) VALUES (
-      @item_id, @kind, @image_type, @title, @section_ids_json, @placement, @priority,
+      @item_id, @kind, @image_type, @title, @section_ids_json, @placement, @priority, @asset_id,
       @generation_status, @generation_mode, @generation_code, @generation_source_path,
       @generation_asset_url, @generation_attempts, @generation_error, @generation_updated_at,
       @sort_order, @updated_at
@@ -1372,6 +1446,7 @@ function createTechnicalPlanStore({ app, db, fileService, agentService, taskLogS
       section_ids_json = excluded.section_ids_json,
       placement = excluded.placement,
       priority = excluded.priority,
+      asset_id = excluded.asset_id,
       generation_status = excluded.generation_status,
       generation_mode = excluded.generation_mode,
       generation_code = excluded.generation_code,
@@ -1435,6 +1510,7 @@ function createTechnicalPlanStore({ app, db, fileService, agentService, taskLogS
         section_ids: safeJsonParse(row.section_ids_json, []),
         placement: row.placement,
         priority: Number(row.priority || 0),
+        ...(row.asset_id ? { asset_id: row.asset_id } : {}),
         ...(generation ? { generation } : {}),
       };
     });
@@ -1583,6 +1659,7 @@ function createTechnicalPlanStore({ app, db, fileService, agentService, taskLogS
     db.prepare('DELETE FROM technical_plan_reference_docs').run();
     db.prepare('DELETE FROM technical_plan_outline_nodes').run();
     db.prepare('DELETE FROM technical_plan_global_fact_groups').run();
+    clearPlanningArtifacts();
     clearContentIllustrationPlan();
     clearOriginalOutlineRuntime();
     clearTechnicalPlanMermaidCache();
@@ -1623,6 +1700,7 @@ function createTechnicalPlanStore({ app, db, fileService, agentService, taskLogS
     db.prepare('DELETE FROM technical_plan_reference_docs').run();
     db.prepare('DELETE FROM technical_plan_outline_nodes').run();
     db.prepare('DELETE FROM technical_plan_global_fact_groups').run();
+    clearPlanningArtifacts();
     clearContentIllustrationPlan();
     clearOriginalOutlineRuntime();
     clearTechnicalPlanMermaidCache();
@@ -1691,6 +1769,7 @@ function createTechnicalPlanStore({ app, db, fileService, agentService, taskLogS
     db.prepare('DELETE FROM technical_plan_content_plans').run();
     db.prepare('DELETE FROM technical_plan_outline_nodes').run();
     db.prepare('DELETE FROM technical_plan_global_fact_groups').run();
+    clearPlanningArtifacts();
     clearContentIllustrationPlan();
     clearOriginalOutlineRuntime();
     clearTechnicalPlanMermaidCache();
@@ -1898,6 +1977,10 @@ function createTechnicalPlanStore({ app, db, fileService, agentService, taskLogS
     if (hasOwn(partial, 'globalFacts')) {
       replaceGlobalFacts(partial.globalFacts);
     }
+    if (hasOwn(partial, 'bidPlan')) replacePlanningSingleton('technical_plan_bid_plan', 'plan_json', partial.bidPlan);
+    if (hasOwn(partial, 'responseTables')) replaceResponseTables(partial.responseTables);
+    if (hasOwn(partial, 'parameterRegistry')) replacePlanningSingleton('technical_plan_parameter_registry', 'registry_json', partial.parameterRegistry);
+    if (hasOwn(partial, 'qualityCheck')) replacePlanningSingleton('technical_plan_quality_check', 'result_json', partial.qualityCheck);
 
     if (invalidatesContentGeneration) clearContentGenerationState();
 
@@ -1997,6 +2080,10 @@ function createTechnicalPlanStore({ app, db, fileService, agentService, taskLogS
       contentGenerationRuntime: safeJsonParse(meta.content_generation_runtime_json, undefined),
       contentIllustrationPlan: loadContentIllustrationPlan(),
       bidTemplateExists: fs.existsSync(bidTemplatePath) && fs.existsSync(bidTemplateFieldsPath),
+      bidPlan: loadPlanningSingleton('technical_plan_bid_plan', 'plan_json'),
+      responseTables: loadResponseTables(),
+      parameterRegistry: loadPlanningSingleton('technical_plan_parameter_registry', 'registry_json'),
+      qualityCheck: loadPlanningSingleton('technical_plan_quality_check', 'result_json'),
       contentGenerationSections: loadContentSections(outlineData),
       contentGenerationPlans: loadContentPlans(),
       outlineData,
@@ -2559,6 +2646,7 @@ function createTechnicalPlanStore({ app, db, fileService, agentService, taskLogS
       db.prepare('DELETE FROM technical_plan_reference_docs').run();
       db.prepare('DELETE FROM technical_plan_outline_nodes').run();
       db.prepare('DELETE FROM technical_plan_global_fact_groups').run();
+      clearPlanningArtifacts();
       clearContentIllustrationPlan();
       db.prepare('DELETE FROM technical_plan_meta').run();
       ensureMetaRow();

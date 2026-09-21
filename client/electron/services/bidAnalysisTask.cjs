@@ -1,6 +1,11 @@
 const { buildBidSectionContextHint } = require('../utils/bidSectionContext.cjs');
 const { mergeSegmentedAiResults } = require('../utils/segmentedAiResultMerger.cjs');
 const { splitUserTextByContextLimit } = require('../utils/userTextSplitter.cjs');
+const {
+  generateBidPlan,
+  createResponseTables,
+  buildParameterRegistry,
+} = require('./bidPlanningService.cjs');
 
 const PROMPT_CACHE_WARMUP_DELAY_MS = 5000;
 
@@ -333,6 +338,10 @@ async function runBidAnalysisTask({ aiService, workspaceStore, updateTask, check
       contentGenerationPlans: {},
       contentGenerationRuntime: undefined,
       outlineData: null,
+      bidPlan: undefined,
+      responseTables: undefined,
+      parameterRegistry: undefined,
+      qualityCheck: undefined,
     };
     initialEventPatch = {
       technicalPlanPatch: {
@@ -436,7 +445,43 @@ async function runBidAnalysisTask({ aiService, workspaceStore, updateTask, check
     return;
   }
 
-  checkpointTask({ status: 'success', progress: 100, error: undefined, logs: ['招标文件解析完成。'] });
+  updateTask({
+    status: 'running',
+    progress: 95,
+    logs: ['招标要求提取完成，正在生成 Bid Plan、响应表和参数注册表。'],
+  });
+  let bidPlan;
+  try {
+    bidPlan = await generateBidPlan({
+      aiService,
+      tenderMarkdown: fileContent,
+      bidAnalysisTasks: currentTasks,
+    });
+  } catch (error) {
+    const message = `Bid Planning 未完成：${error.message || String(error)}`;
+    checkpointTask({ status: 'error', progress: 100, error: message, logs: [message] });
+    return;
+  }
+  const parameterRegistry = buildParameterRegistry(bidPlan);
+  const responseTables = createResponseTables(bidPlan, parameterRegistry);
+
+  checkpointTask(
+    {
+      status: 'success',
+      progress: 100,
+      error: undefined,
+      logs: [`Bid Planning 完成：${bidPlan.technical_topics.length} 个技术主题，${Object.keys(responseTables).length} 张必需响应表。`, '招标文件解析完成。'],
+      stats: {
+        calls: {
+          bid_planning_llm: 1,
+          response_table_llm: 0,
+          parameter_registry_llm: 0,
+        },
+      },
+    },
+    { bidPlan, responseTables, parameterRegistry, qualityCheck: undefined },
+    { technicalPlanPatch: { bidPlan, responseTables, parameterRegistry, qualityCheck: undefined } },
+  );
 }
 
 module.exports = {

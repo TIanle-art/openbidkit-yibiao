@@ -1,6 +1,5 @@
 import * as Dialog from '@radix-ui/react-dialog';
 import { useCallback, useEffect, useMemo, useState, type CSSProperties } from 'react';
-import { trackPageView } from '../../../shared/analytics/analytics';
 import { useToast } from '../../../shared/ui';
 import type { ExportTemplateRecord } from '../../../shared/types/exportFormat';
 import { DEFAULT_EXPORT_FORMAT } from '../../../shared/types/exportFormat';
@@ -49,7 +48,6 @@ function MyTemplatesPage({ onCreateTemplate, onEditTemplate }: MyTemplatesPagePr
   }, [showToast]);
 
   useEffect(() => {
-    trackPageView('my-templates');
     void loadTemplates();
   }, [loadTemplates]);
 

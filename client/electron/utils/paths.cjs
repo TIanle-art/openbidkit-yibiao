@@ -105,8 +105,25 @@ function getImportedImagesDir(app) {
   return path.join(getWorkspaceDir(app), 'imported-images');
 }
 
+/** 图片知识库（图示素材库）图片根目录。 */
+function getImageLibraryDir(app) {
+  return path.join(getWorkspaceDir(app), 'image-library');
+}
+
 function getKnowledgeBaseDir(app) {
   return path.join(getWorkspaceDir(app), 'knowledge-base');
+}
+
+function getPastBidTemplatesDir(app) {
+  return path.join(getWorkspaceDir(app), 'past-bid-templates');
+}
+
+function getPastBidTemplateDir(app, templateId) {
+  return path.join(getPastBidTemplatesDir(app), templateId);
+}
+
+function getPastBidTemplateSourcesDir(app, templateId) {
+  return path.join(getPastBidTemplateDir(app, templateId), 'sources');
 }
 
 function getAiLogsDir(app) {
@@ -197,6 +214,7 @@ module.exports = {
   getFeasibilityReportDir,
   getFeasibilityReportSourcesDir,
   getGeneratedImagesDir,
+  getImageLibraryDir,
   getImportedImagesDir,
   getKnowledgeBaseDir,
   getLicenseFilePath,
@@ -204,6 +222,9 @@ module.exports = {
   getOpenXmlHelperProjectPath,
   getOpenXmlJobDir,
   getOpenXmlJobsDir,
+  getPastBidTemplateDir,
+  getPastBidTemplatesDir,
+  getPastBidTemplateSourcesDir,
   getRejectionCheckDir,
   getRejectionCheckDocumentMarkdownPath,
   getTechnicalPlanDir,

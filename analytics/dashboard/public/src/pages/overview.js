@@ -2,23 +2,15 @@ import { assertReady, getEncodedProjectAndDays, loadProjectOptions, requestJson,
 import { state } from '../state.js';
 import { formatNumber, formatPercent, renderTable } from '../render.js';
 
-function renderGitHubStats(repo) {
-  state.githubStars.textContent = repo ? formatNumber(repo.stars) : '-';
-  state.githubForks.textContent = repo ? formatNumber(repo.forks) : '-';
-  state.githubOpenIssues.textContent = repo ? formatNumber(repo.openIssues) : '-';
-  state.githubRepoUrl.href = repo?.htmlUrl || 'https://github.com/FB208/OpenBidKit_Yibiao';
-}
-
 export async function loadOverview() {
   assertReady();
   await loadProjectOptions();
   saveSettings();
 
   const { projectName } = getEncodedProjectAndDays('30');
-  const [summary, retention, githubStats] = await Promise.all([
+  const [summary, retention] = await Promise.all([
     requestJson(`/api/overview?projectName=${projectName}`),
     requestJson(`/api/retention?projectName=${projectName}&days=30`).catch(() => ({ retention: [] })),
-    requestJson('/api/github-repo-stats').catch(() => ({ repo: null })),
   ]);
 
   const daily = (summary.daily || []).map((row) => ({
@@ -40,7 +32,6 @@ export async function loadOverview() {
   state.todayActiveClients.textContent = formatNumber(summary.todayActiveClients);
   state.todayNewClients.textContent = formatNumber(summary.todayNewClients);
   state.last7NewClients.textContent = formatNumber(summary.last7NewClients);
-  renderGitHubStats(githubStats.repo);
 
   renderTable(state.dailyTable, daily, [
     { key: 'date', label: '日期' },

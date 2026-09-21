@@ -16,6 +16,7 @@ export interface OutlineItem {
   content_mode_note?: string;
   source_requirement_id?: string;
   source_requirement_title?: string;
+  technical_topic_ids?: string[];
   knowledge_item_ids?: string[];
   children?: OutlineItem[];
   content?: string;

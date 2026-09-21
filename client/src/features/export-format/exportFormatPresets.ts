@@ -21,10 +21,21 @@ type LayoutPageSettings = Pick<
   | 'margin_bottom_cm'
   | 'margin_left_cm'
   | 'margin_right_cm'
+  | 'header_enabled'
+  | 'header_text'
+  | 'footer_enabled'
   | 'page_number_enabled'
   | 'page_number_format'
   | 'page_number_start'
 >;
+
+// 投标文件的可交付底线：页眉能看出是谁的标、页脚有页码。
+// 预设以前完全不碰这三个开关，于是任何版面预设都不能把一份真正可提交的文档配出来。
+const BID_PAGE_FURNITURE: Pick<PageSetupConfig, 'header_enabled' | 'header_text' | 'footer_enabled'> = {
+  header_enabled: true,
+  header_text: '{project} 投标文件',
+  footer_enabled: true,
+};
 
 interface ExportLayoutPreset {
   id: string;
@@ -100,6 +111,7 @@ export const EXPORT_LAYOUT_PRESETS: ExportLayoutPreset[] = [
     label: '标准投标版',
     description: 'A4 纵向、常规边距、小四正文，适合大多数技术方案。',
     page: {
+      ...BID_PAGE_FURNITURE,
       paper_size: 'a4',
       orientation: 'portrait',
       first_page_different: false,
@@ -107,8 +119,8 @@ export const EXPORT_LAYOUT_PRESETS: ExportLayoutPreset[] = [
       margin_bottom_cm: 2,
       margin_left_cm: 2,
       margin_right_cm: 2,
-      page_number_enabled: false,
-      page_number_format: '第{page}页',
+      page_number_enabled: true,
+      page_number_format: '第{page}页 共{total}页',
       page_number_start: 1,
     },
     heading_level1_page_break_before: false,
@@ -157,6 +169,7 @@ export const EXPORT_LAYOUT_PRESETS: ExportLayoutPreset[] = [
     label: '正式装订版',
     description: '左侧留装订空间、一级标题另起页，适合打印装订文档。',
     page: {
+      ...BID_PAGE_FURNITURE,
       paper_size: 'a4',
       orientation: 'portrait',
       first_page_different: true,
@@ -214,6 +227,7 @@ export const EXPORT_LAYOUT_PRESETS: ExportLayoutPreset[] = [
     label: '紧凑评审版',
     description: '更小边距和字号，适合内容较多、需要控制页数的文档。',
     page: {
+      ...BID_PAGE_FURNITURE,
       paper_size: 'a4',
       orientation: 'portrait',
       first_page_different: false,
@@ -271,6 +285,7 @@ export const EXPORT_LAYOUT_PRESETS: ExportLayoutPreset[] = [
     label: '宽表格横版',
     description: 'A4 横向、紧凑表格，适合设备清单、进度表等宽表内容。',
     page: {
+      ...BID_PAGE_FURNITURE,
       paper_size: 'a4',
       orientation: 'landscape',
       first_page_different: false,
@@ -328,6 +343,7 @@ export const EXPORT_LAYOUT_PRESETS: ExportLayoutPreset[] = [
     label: '图文展示版',
     description: '图片占比更高、标题更清晰，适合流程图和架构图较多的方案。',
     page: {
+      ...BID_PAGE_FURNITURE,
       paper_size: 'a4',
       orientation: 'portrait',
       first_page_different: true,
@@ -385,6 +401,7 @@ export const EXPORT_LAYOUT_PRESETS: ExportLayoutPreset[] = [
     label: '章节页框版',
     description: '启用章节页框，适合强调章节结构的正式方案。',
     page: {
+      ...BID_PAGE_FURNITURE,
       paper_size: 'a4',
       orientation: 'portrait',
       first_page_different: true,
@@ -442,6 +459,7 @@ export const EXPORT_LAYOUT_PRESETS: ExportLayoutPreset[] = [
     label: '左题栏页框版',
     description: '启用章节页框，最小标题固定在正文左侧，适合条目化响应内容。',
     page: {
+      ...BID_PAGE_FURNITURE,
       paper_size: 'a4',
       orientation: 'portrait',
       first_page_different: true,
@@ -734,8 +752,15 @@ export function applyExportThemePreset(config: ExportFormatConfig, presetId: str
 
   if (!config.heading_border.enabled) {
     const withoutGlobalThemeColors = clearDisabledFrameThemeColors(config);
+    // 页眉页脚是否跟随主题，取决于它本身是否开启，而不是取决于有没有章节页框。
+    // 之前这里只在页框启用时才上主题色，导致默认预设（页框关闭）的页眉颜色永远不生效。
     return {
       ...withoutGlobalThemeColors,
+      page: {
+        ...withoutGlobalThemeColors.page,
+        ...(config.page.header_enabled ? { header_color: preset.header_footer_color } : {}),
+        ...(config.page.footer_enabled || config.page.page_number_enabled ? { footer_color: preset.header_footer_color } : {}),
+      },
       table,
     };
   }

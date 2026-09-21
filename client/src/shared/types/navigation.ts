@@ -2,6 +2,7 @@ export type SectionId =
   | 'bid-generation'
   | 'technical-plan'
   | 'existing-plan-expansion'
+  | 'past-bid-template'
   | 'feasibility-report'
   | 'business-bid'
   | 'knowledge-base'
@@ -27,19 +28,12 @@ export type SectionId =
   | 'settings'
   | 'plugin-manager';
 
-export interface AppMenuNotice {
-  message: string;
-  actionLabel?: string;
-  externalUrl?: string;
-}
-
 export interface AppSubMenuItem {
   id: SectionId;
   label: string;
   description: string;
   icon?: 'document' | 'expand' | 'briefcase' | 'compare' | 'shield' | 'code' | 'prompt' | 'file' | 'export' | 'tool';
   badge?: string;
-  notice?: AppMenuNotice;
 }
 
 export interface AppMenuItem {
@@ -47,5 +41,4 @@ export interface AppMenuItem {
   label: string;
   description: string;
   children?: AppSubMenuItem[];
-  notice?: AppMenuNotice;
 }

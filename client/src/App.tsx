@@ -5,7 +5,6 @@ import LicenseStatusPrompt from './app/LicenseStatusPrompt';
 import RequiredOnlineServicesPrompt from './app/RequiredOnlineServicesPrompt';
 import UpdateNotifier from './app/UpdateNotifier';
 import AppShell from './components/AppShell';
-import { trackAppOpen, trackConfigUsage, trackPageView } from './shared/analytics/analytics';
 import type { SectionId } from './shared/types/navigation';
 
 function isDeveloperSection(section: SectionId) {
@@ -22,18 +21,14 @@ function App() {
   const leaveGuardRef = useRef<((nextSection?: string) => Promise<boolean>) | null>(null);
 
   useEffect(() => {
-    trackAppOpen();
-
     void window.yibiao?.config.load()
       .then((config) => {
         setDeveloperMode(Boolean(config?.developer_mode));
-        trackConfigUsage({}, config);
       })
       .catch((error) => console.warn('读取开发者模式失败', error));
   }, []);
 
   useEffect(() => {
-    trackPageView(activeSection);
     if (isManagedWorkbenchSection(activeSection)) return;
     void window.yibiao?.ui?.setCurrentView({ section: activeSection });
   }, [activeSection]);

@@ -4,7 +4,7 @@ const path = require('node:path');
 const { pathToFileURL } = require('node:url');
 const { registerIpcHandlers } = require('./ipc/index.cjs');
 const { setupAutoUpdate, checkAndDownloadUpdate, triggerUpdateDownload, quitAndInstall, getLatestVersion, getUpdateDownloadUrl } = require('./services/updateService.cjs');
-const { getConfigFilePath, getGeneratedImagesDir, getGpuStartupProbePath, getImportedImagesDir } = require('./utils/paths.cjs');
+const { getConfigFilePath, getGeneratedImagesDir, getGpuStartupProbePath, getImageLibraryDir, getImportedImagesDir } = require('./utils/paths.cjs');
 
 const rendererUrl = process.env.ELECTRON_RENDERER_URL;
 const iconPath = path.join(__dirname, '../assets/icon.ico');
@@ -246,6 +246,7 @@ function registerAssetProtocol() {
       const assetRoots = {
         'generated-images': getGeneratedImagesDir(app),
         'imported-images': getImportedImagesDir(app),
+        'image-library': getImageLibraryDir(app),
       };
       const rootDir = assetRoots[url.hostname];
       if (!rootDir) {

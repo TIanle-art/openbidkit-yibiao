@@ -172,6 +172,13 @@ const bridge = {
     saveGlobalFactsConfig: (payload) => ipcRenderer.invoke('technical-plan:save-global-facts-config', payload),
     saveGlobalFacts: (globalFacts) => ipcRenderer.invoke('technical-plan:save-global-facts', globalFacts),
     saveContentGenerationOptions: (options) => ipcRenderer.invoke('technical-plan:save-content-generation-options', options),
+    runTemplateFill: () => ipcRenderer.invoke('technical-plan:run-template-fill'),
+    cancelTemplateFill: () => ipcRenderer.invoke('technical-plan:cancel-template-fill'),
+    onTemplateFillProgress: (callback) => {
+      const listener = (_event, payload) => callback(payload);
+      ipcRenderer.on('technical-plan:template-fill-progress', listener);
+      return () => ipcRenderer.removeListener('technical-plan:template-fill-progress', listener);
+    },
     saveChapterContent: (payload) => ipcRenderer.invoke('technical-plan:save-chapter-content', payload),
     clear: () => ipcRenderer.invoke('technical-plan:clear'),
     openBidTemplate: () => ipcRenderer.invoke('technical-plan:open-bid-template'),
@@ -207,12 +214,39 @@ const bridge = {
     updateState: (partial) => ipcRenderer.invoke('rejection-check:update-state', partial),
     clear: () => ipcRenderer.invoke('rejection-check:clear'),
   },
+  imageLibrary: {
+    listFolders: () => ipcRenderer.invoke('image-library:list-folders'),
+    createFolder: (name) => ipcRenderer.invoke('image-library:create-folder', name),
+    renameFolder: (folderId, name) => ipcRenderer.invoke('image-library:rename-folder', folderId, name),
+    deleteFolder: (folderId) => ipcRenderer.invoke('image-library:delete-folder', folderId),
+    listImages: (folderId) => ipcRenderer.invoke('image-library:list-images', folderId),
+    uploadImages: (folderId, filePaths) => ipcRenderer.invoke('image-library:upload-images', folderId, filePaths),
+    deleteImage: (imageId) => ipcRenderer.invoke('image-library:delete-image', imageId),
+    deleteImages: (imageIds) => ipcRenderer.invoke('image-library:delete-images', imageIds),
+    moveImage: (imageId, folderId) => ipcRenderer.invoke('image-library:move-image', imageId, folderId),
+    renameImage: (imageId, name) => ipcRenderer.invoke('image-library:rename-image', imageId, name),
+    updateImageMeta: (imageId, meta) => ipcRenderer.invoke('image-library:update-image-meta', imageId, meta),
+    describeImages: (imageIds) => ipcRenderer.invoke('image-library:describe-images', imageIds),
+    listDocumentImages: () => ipcRenderer.invoke('image-library:list-document-images'),
+    importDocumentImages: (documentImageIds, folderId) => ipcRenderer.invoke('image-library:import-document-images', documentImageIds, folderId),
+  },
   templates: {
     list: () => ipcRenderer.invoke('templates:list'),
     get: (templateId) => ipcRenderer.invoke('templates:get', templateId),
     create: (config) => ipcRenderer.invoke('templates:create', config),
     update: (templateId, config) => ipcRenderer.invoke('templates:update', templateId, config),
     delete: (templateId) => ipcRenderer.invoke('templates:delete', templateId),
+    deriveFromFile: (filePaths) => ipcRenderer.invoke('templates:derive-from-file', filePaths),
+  },
+  pastBidTemplate: {
+    list: () => ipcRenderer.invoke('past-bid-template:list'),
+    get: (templateId) => ipcRenderer.invoke('past-bid-template:get', templateId),
+    create: (input) => ipcRenderer.invoke('past-bid-template:create', input),
+    delete: (templateId) => ipcRenderer.invoke('past-bid-template:delete', templateId),
+    readSource: (templateId, fileName) => ipcRenderer.invoke('past-bid-template:read-source', templateId, fileName),
+    startExtract: (filePaths) => ipcRenderer.invoke('past-bid-template:start-extract', filePaths),
+    saveMarkdown: (payload) => ipcRenderer.invoke('past-bid-template:save-markdown', payload),
+    exportWord: (payload) => ipcRenderer.invoke('past-bid-template:export-word', payload),
   },
   tasks: {
     startBidSectionExtraction: (payload) => ipcRenderer.invoke('tasks:start-bid-section-extraction', payload),
@@ -247,6 +281,12 @@ const bridge = {
       ipcRenderer.on('export:word-progress', listener);
       return () => ipcRenderer.removeListener('export:word-progress', listener);
     },
+  },
+  fullFidelityBid: {
+    decomposeMaster: (masterDocxPath) => ipcRenderer.invoke('full-fidelity:decompose-master', masterDocxPath),
+    assembleBid: (payload) => ipcRenderer.invoke('full-fidelity:assemble-bid', payload),
+    assembleSadingBid: (payload) => ipcRenderer.invoke('full-fidelity:assemble-sading-bid', payload),
+    assembleGuaguiBid: (payload) => ipcRenderer.invoke('full-fidelity:assemble-guagui-bid', payload),
   },
   systemFonts: {
     list: () => ipcRenderer.invoke('system-fonts:list'),

@@ -96,6 +96,7 @@ function normalizeDocument(document) {
     system_discarded_after_retry_count: Number(document?.system_discarded_after_retry_count || 0),
     last_batch_size: document?.last_batch_size === undefined || document?.last_batch_size === null ? undefined : Number(document.last_batch_size || 0),
     parser_label: document?.parser_label ? String(document.parser_label) : undefined,
+    revision: Math.max(1, Number(document?.revision || 1)),
     sort_order: hasSortOrder ? Number(document.sort_order ?? document.sortOrder ?? 0) : undefined,
     created_at: document?.created_at || now(),
     updated_at: document?.updated_at || now(),
@@ -135,6 +136,7 @@ function createKnowledgeBaseStore({ app, db }) {
       system_discarded_after_retry_count: Number(row.system_discarded_after_retry_count || 0),
       last_batch_size: row.last_batch_size === null || row.last_batch_size === undefined ? undefined : Number(row.last_batch_size || 0),
       parser_label: row.parser_label || undefined,
+      revision: Math.max(1, Number(row.revision || 1)),
       sort_order: Number(row.sort_order || 0),
       created_at: row.created_at,
       updated_at: row.updated_at,
@@ -200,6 +202,7 @@ function createKnowledgeBaseStore({ app, db }) {
       system_discarded_after_retry_count: normalized.system_discarded_after_retry_count,
       last_batch_size: normalized.last_batch_size === undefined ? null : normalized.last_batch_size,
       parser_label: normalized.parser_label || null,
+      revision: normalized.revision,
       sort_order: Number(normalized.sort_order || 0),
       created_at: normalized.created_at,
       updated_at: normalized.updated_at,
@@ -208,12 +211,12 @@ function createKnowledgeBaseStore({ app, db }) {
       INSERT INTO knowledge_documents (
         document_id, folder_id, file_name, document_dir, source_path, markdown_path, markdown_hash, markdown_chars,
         source_extension, status, progress, message, error, item_count, block_count, filtered_block_count,
-        candidate_item_count, discarded_block_count, system_discarded_after_retry_count, last_batch_size, parser_label, sort_order,
+        candidate_item_count, discarded_block_count, system_discarded_after_retry_count, last_batch_size, parser_label, revision, sort_order,
         created_at, updated_at
       ) VALUES (
         @document_id, @folder_id, @file_name, @document_dir, @source_path, @markdown_path, @markdown_hash, @markdown_chars,
         @source_extension, @status, @progress, @message, @error, @item_count, @block_count, @filtered_block_count,
-        @candidate_item_count, @discarded_block_count, @system_discarded_after_retry_count, @last_batch_size, @parser_label, @sort_order,
+        @candidate_item_count, @discarded_block_count, @system_discarded_after_retry_count, @last_batch_size, @parser_label, @revision, @sort_order,
         @created_at, @updated_at
       ) ON CONFLICT(document_id) DO UPDATE SET
         folder_id = excluded.folder_id,
@@ -502,17 +505,73 @@ function createKnowledgeBaseStore({ app, db }) {
 
   function updateMarkdownMetadata(documentId, markdown, parserLabel) {
     const content = String(markdown || '');
+    const markdownHash = stableHash(content);
     db.prepare(`
       UPDATE knowledge_documents
-      SET markdown_hash = @markdown_hash, markdown_chars = @markdown_chars, parser_label = COALESCE(@parser_label, parser_label), updated_at = @updated_at
+      SET revision = CASE
+            WHEN markdown_hash IS NOT NULL AND markdown_hash <> @markdown_hash THEN revision + 1
+            ELSE revision
+          END,
+          markdown_hash = @markdown_hash,
+          markdown_chars = @markdown_chars,
+          parser_label = COALESCE(@parser_label, parser_label),
+          updated_at = @updated_at
       WHERE document_id = @document_id
     `).run({
       document_id: documentId,
-      markdown_hash: stableHash(content),
+      markdown_hash: markdownHash,
       markdown_chars: content.length,
       parser_label: parserLabel ? String(parserLabel) : null,
       updated_at: now(),
     });
+  }
+
+  function replaceDocumentImages(documentId, images = []) {
+    db.prepare('DELETE FROM knowledge_document_images WHERE document_id = ?').run(documentId);
+    if (!Array.isArray(images) || !images.length) return;
+    const insert = db.prepare(`
+      INSERT INTO knowledge_document_images (
+        image_id, document_id, batch_id, asset_url, file_name, mime, ext, byte_size, created_at,
+        position_index, section_level1, section_level2, section_path_json, context_text
+      ) VALUES (
+        @image_id, @document_id, @batch_id, @asset_url, @file_name, @mime, @ext, @byte_size, @created_at,
+        @position_index, @section_level1, @section_level2, @section_path_json, @context_text
+      )
+    `);
+    const timestamp = now();
+    const run = db.transaction((rows) => {
+      for (const row of rows) {
+        insert.run({
+          ...row,
+          created_at: row.created_at || timestamp,
+          position_index: Number.isFinite(row.position_index) ? row.position_index : 0,
+          section_level1: row.section_level1 || null,
+          section_level2: row.section_level2 || null,
+          section_path_json: row.section_path_json || null,
+          context_text: row.context_text || null,
+        });
+      }
+    });
+    run(images);
+  }
+
+  function getDocumentImages(documentId) {
+    return db.prepare(`
+      SELECT image_id, document_id, batch_id, asset_url, file_name, mime, ext, byte_size, created_at,
+             position_index, section_level1, section_level2, section_path_json, context_text
+      FROM knowledge_document_images WHERE document_id = ? ORDER BY position_index ASC, created_at ASC
+    `).all(documentId);
+  }
+
+  // 按章节锚点取图，供原件回填按目录顺序匹配。
+  function listDocumentImagesWithAnchors() {
+    return db.prepare(`
+      SELECT image_id, document_id, batch_id, asset_url, file_name, mime, ext, byte_size, created_at,
+             position_index, section_level1, section_level2, section_path_json, context_text
+      FROM knowledge_document_images
+      WHERE COALESCE(section_level1, '') <> ''
+      ORDER BY document_id ASC, position_index ASC
+    `).all();
   }
 
   function replaceBlocks(documentId, blocks, filteredBlocks) {
@@ -617,8 +676,8 @@ function createKnowledgeBaseStore({ app, db }) {
     db.prepare('DELETE FROM knowledge_items WHERE document_id = ?').run(documentId);
     const timestamp = now();
     const itemInsert = db.prepare(`
-      INSERT INTO knowledge_items (document_id, item_id, title, resume, content, source_file, content_chars, sort_order, created_at, updated_at)
-      VALUES (@document_id, @item_id, @title, @resume, @content, @source_file, @content_chars, @sort_order, @created_at, @updated_at)
+      INSERT INTO knowledge_items (document_id, item_id, title, resume, content, source_file, content_chars, content_hash, sort_order, created_at, updated_at)
+      VALUES (@document_id, @item_id, @title, @resume, @content, @source_file, @content_chars, @content_hash, @sort_order, @created_at, @updated_at)
     `);
     const blockInsert = db.prepare(`
       INSERT OR IGNORE INTO knowledge_item_blocks (document_id, item_id, block_id, sort_order)
@@ -635,6 +694,7 @@ function createKnowledgeBaseStore({ app, db }) {
         content,
         source_file: item.source_file ? String(item.source_file) : null,
         content_chars: getContentCharCount(content),
+        content_hash: stableHash(`${item.title || ''}\n${item.resume || item.summary || ''}\n${content}`),
         sort_order: index,
         created_at: timestamp,
         updated_at: timestamp,
@@ -970,6 +1030,7 @@ function createKnowledgeBaseStore({ app, db }) {
       content: row.content,
       source_block_ids: blocksByItem.get(row.item_id) || [],
       source_file: row.source_file || undefined,
+      content_hash: row.content_hash || undefined,
     }));
   }
 
@@ -1015,6 +1076,7 @@ function createKnowledgeBaseStore({ app, db }) {
           content: row.content,
           source_block_ids: blocksByItem.get(`${row.document_id}::${row.item_id}`) || [],
           source_file: row.source_file || undefined,
+          content_hash: row.content_hash || undefined,
         });
         itemsByDocument.set(row.document_id, items);
       }
@@ -1115,6 +1177,9 @@ function createKnowledgeBaseStore({ app, db }) {
     moveDocument,
     updateDocument,
     updateMarkdownMetadata,
+    replaceDocumentImages,
+    getDocumentImages,
+    listDocumentImagesWithAnchors,
     getDocument,
     recoverInterruptedDocuments,
     getDocumentStep,

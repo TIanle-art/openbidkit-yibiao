@@ -249,6 +249,38 @@ function createFeasibilityReportStore({ app, db, fileService, taskLogStore, agen
     `).run(next);
   }
 
+  function loadReferenceDocumentIds() {
+    return db.prepare(`
+      SELECT document_id
+      FROM feasibility_report_reference_docs
+      WHERE report_id = 1
+      ORDER BY sort_order ASC
+    `).all().map((row) => row.document_id);
+  }
+
+  function replaceReferenceDocumentIds(documentIds) {
+    const ids = normalizeDocumentIds(documentIds);
+    const findDocument = db.prepare('SELECT document_id, revision, markdown_hash FROM knowledge_documents WHERE document_id = ?');
+    const insert = db.prepare(`
+      INSERT INTO feasibility_report_reference_docs (
+        report_id, document_id, document_revision, markdown_hash, sort_order, created_at
+      ) VALUES (1, @document_id, @document_revision, @markdown_hash, @sort_order, @created_at)
+    `);
+    db.prepare('DELETE FROM feasibility_report_reference_docs WHERE report_id = 1').run();
+    const timestamp = now();
+    ids.forEach((documentId, index) => {
+      const document = findDocument.get(documentId);
+      if (!document) return;
+      insert.run({
+        document_id: document.document_id,
+        document_revision: Math.max(1, Number(document.revision || 1)),
+        markdown_hash: document.markdown_hash || null,
+        sort_order: index,
+        created_at: timestamp,
+      });
+    });
+  }
+
   function taskFromRow(row) {
     if (!row) return undefined;
     return {
@@ -465,7 +497,7 @@ function createFeasibilityReportStore({ app, db, fileService, taskLogStore, agen
       analysisMarkdown: String(meta.analysis_markdown || ''),
       outlineTemplate: normalizeTemplate(meta.outline_template),
       targetWords: normalizeTargetWords(meta.target_words),
-      referenceDocumentIds: normalizeDocumentIds(safeJsonParse(meta.reference_document_ids_json, [])),
+      referenceDocumentIds: loadReferenceDocumentIds(),
       keyParametersMarkdown: String(meta.key_parameters_markdown || ''),
       outlineData: loadOutlineData(meta),
       ...tasks,
@@ -484,6 +516,7 @@ function createFeasibilityReportStore({ app, db, fileService, taskLogStore, agen
       if (hasOwn(partial, 'referenceDocumentIds')) metaPatch.reference_document_ids_json = jsonOrNull(normalizeDocumentIds(partial.referenceDocumentIds));
       if (hasOwn(partial, 'keyParametersMarkdown')) metaPatch.key_parameters_markdown = partial.keyParametersMarkdown ? String(partial.keyParametersMarkdown) : null;
       if (Object.keys(metaPatch).length) updateMeta(metaPatch);
+      if (hasOwn(partial, 'referenceDocumentIds')) replaceReferenceDocumentIds(partial.referenceDocumentIds);
       if (hasOwn(partial, 'outlineData')) saveOutlineData(partial.outlineData);
       for (const [field, type] of Object.entries(TASK_FIELD_TYPES)) {
         if (hasOwn(partial, field)) saveTask(type, partial[field] || null);
@@ -526,11 +559,16 @@ function createFeasibilityReportStore({ app, db, fileService, taskLogStore, agen
   }
 
   function saveOutlineConfig(payload = {}) {
-    updateMeta({
-      outline_template: normalizeTemplate(payload.outlineTemplate),
-      target_words: normalizeTargetWords(payload.targetWords),
-      reference_document_ids_json: jsonOrNull(normalizeDocumentIds(payload.referenceDocumentIds)),
+    const documentIds = normalizeDocumentIds(payload.referenceDocumentIds);
+    const transaction = db.transaction(() => {
+      updateMeta({
+        outline_template: normalizeTemplate(payload.outlineTemplate),
+        target_words: normalizeTargetWords(payload.targetWords),
+        reference_document_ids_json: jsonOrNull(documentIds),
+      });
+      replaceReferenceDocumentIds(documentIds);
     });
+    transaction();
     return loadFeasibilityReport();
   }
 
@@ -686,6 +724,7 @@ function createFeasibilityReportStore({ app, db, fileService, taskLogStore, agen
     const timestamp = now();
     const transaction = db.transaction(() => {
       db.prepare('DELETE FROM feasibility_report_outline_nodes').run();
+      db.prepare('DELETE FROM feasibility_report_reference_docs WHERE report_id = 1').run();
       deleteTasks();
       db.prepare(`
         UPDATE feasibility_report_meta SET

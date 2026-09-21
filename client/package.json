@@ -35,14 +35,6 @@
       "assets/**/*",
       "package.json"
     ],
-    "publish": [
-      {
-        "provider": "github",
-        "owner": "FB208",
-        "repo": "OpenBidKit_Yibiao",
-        "releaseType": "release"
-      }
-    ],
     "win": {
       "icon": "assets/icon.ico",
       "extraResources": [

@@ -7,7 +7,7 @@ const textModelProviders = ['jinlong', 'volcengine', 'deepseek', 'agnes', 'custo
 const legacyTextModelProviders = ['longcat'];
 const imageModelProviders = ['jinlong', 'volcengine', 'google-ai-studio', 'agnes', 'custom', 'comfyui'];
 const aiRequestModes = ['normal', 'stream'];
-const updateChannels = ['github', 'cloudflare', 'atomgit'];
+const updateChannels = ['cloudflare'];
 const DEFAULT_TEXT_CONTEXT_LENGTH_LIMIT = 400000;
 const DEFAULT_TEXT_CONCURRENCY_LIMIT = 10;
 const DEFAULT_TEXT_TEMPERATURE = 0.7;
@@ -17,8 +17,9 @@ const MIN_COMPONENT_CONCURRENCY_LIMIT = 1;
 const MAX_COMPONENT_CONCURRENCY_LIMIT = 20;
 const DEFAULT_AGENT_AUTO_ANSWER_ENABLED = false;
 const DEFAULT_HEADING_BORDER_CELL_COLORS = ['#eef5ff', '#f3f7ff', '#f8fbff', '#fbfdff', '#ffffff', '#ffffff'];
-const openAICompatibleImageSizes = ['auto', '1024x1024', '1536x1024', '1024x1536', '2048x2048', '2048x1152', '3840x2160', '2160x3840'];
+const openAICompatibleImageSizes = ['auto', '1K', '2K', '3K', '4K', '1024x768', '1024x1024', '768x1024', '1536x1024', '1024x1536', '2048x2048', '2048x1152', '3840x2160', '2160x3840'];
 const googleImageSizes = ['512', '1K', '2K', '4K'];
+const agnesImageRatios = ['1:1', '3:4', '4:3', '16:9', '9:16', '2:3', '3:2', '21:9'];
 
 const defaultAgentModeScenarios = {
   existing_plan_expansion_original_outline_extraction: true,
@@ -123,7 +124,8 @@ const defaultImageModelProfiles = {
     api_key: '',
     model_name: '',
     image_size: '1024x1024',
-    request_mode: 'stream',
+    image_ratio: '1:1',
+    request_mode: 'normal',
     concurrency_limit: DEFAULT_IMAGE_CONCURRENCY_LIMIT,
     status: 'untested',
     tested_at: '',
@@ -180,31 +182,34 @@ const defaultImageModelProfiles = {
   },
 };
 
+// 必须与前端 client/src/shared/types/exportFormat.ts 的 DEFAULT_PAGE_SETUP 保持一致。
+// 这里曾经是「页眉/页脚/页码全关 + header_text 为空」，会静默覆盖前端的投标就绪默认值，
+// 导致导出件没有页眉、没有页码，而页眉本应呈现项目名。
 const defaultExportFormat = {
   template_name: '默认模版',
   page: {
     paper_size: 'a4',
     orientation: 'portrait',
-    first_page_different: false,
+    first_page_different: true,
     margin_top_cm: 2,
     margin_bottom_cm: 2,
     margin_left_cm: 2,
     margin_right_cm: 2,
-    header_enabled: false,
-    header_text: '',
+    header_enabled: true,
+    header_text: '{project} 投标文件',
     header_font: '宋体',
     header_size: '小五',
     header_alignment: '居中对齐',
     header_color: '#536176',
-    footer_enabled: false,
+    footer_enabled: true,
     footer_text: '',
     footer_distance_cm: 1.75,
     footer_font: '宋体',
     footer_size: '小五',
     footer_alignment: '居中对齐',
     footer_color: '#536176',
-    page_number_enabled: false,
-    page_number_format: '第{page}页',
+    page_number_enabled: true,
+    page_number_format: '第{page}页 共{total}页',
     page_number_start: 1,
   },
   heading_level1_page_break_before: false,
@@ -279,7 +284,7 @@ const defaultConfig = {
     mermaid_concurrency_limit: DEFAULT_COMPONENT_CONCURRENCY_LIMIT,
     html_concurrency_limit: DEFAULT_COMPONENT_CONCURRENCY_LIMIT,
   },
-  update_channel: 'atomgit',
+  update_channel: 'cloudflare',
   gpu_hardware_acceleration_enabled: true,
   gpu_hardware_acceleration_configured: true,
   export_format: defaultExportFormat,
@@ -494,6 +499,11 @@ function normalizeImageSize(provider, value, fallback) {
   return provider === 'google-ai-studio' ? '1K' : '1024x1024';
 }
 
+// 归一化 Agnes 2.1 图片宽高比。
+function normalizeImageRatio(value) {
+  return agnesImageRatios.includes(value) ? value : '1:1';
+}
+
 function normalizeImageModelProfile(provider, profile) {
   const defaults = defaultImageModelProfiles[provider];
   const source = profile || {};
@@ -506,6 +516,7 @@ function normalizeImageModelProfile(provider, profile) {
     api_key: source.api_key !== undefined ? source.api_key : defaults.api_key,
     model_name: useProviderDefaultImageModel ? defaults.model_name : source.model_name !== undefined ? source.model_name : defaults.model_name,
     image_size: normalizeImageSize(provider, useProviderDefaultImageModel ? defaults.image_size : source.image_size, defaults.image_size),
+    ...(provider === 'agnes' ? { image_ratio: normalizeImageRatio(source.image_ratio) } : {}),
     request_mode: normalizeAiRequestMode(useProviderDefaultImageModel ? defaults.request_mode : source.request_mode, defaults.request_mode),
     concurrency_limit: normalizeImageConcurrencyLimit(source.concurrency_limit, defaults.concurrency_limit),
     comfyui_workflow: source.comfyui_workflow !== undefined ? String(source.comfyui_workflow) : (defaults.comfyui_workflow || ''),
@@ -845,4 +856,7 @@ function createConfigStore(app) {
 
 module.exports = {
   createConfigStore,
+  // 导出默认值与归一化函数，便于用测试锁住「默认导出格式必须是可提交的投标文档」这一约定。
+  defaultExportFormat,
+  normalizeExportFormat,
 };

@@ -11,11 +11,13 @@ import ExportFormatPage from '../features/export-format/pages/ExportFormatPage';
 import MyTemplatesPage from '../features/export-format/pages/MyTemplatesPage';
 import DuplicateCheckPage from '../features/duplicate-check/pages/DuplicateCheckPage';
 import KnowledgeBasePage from '../features/knowledge-base/pages/KnowledgeBasePage';
+import ImageLibraryPage from '../features/image-library/pages/ImageLibraryPage';
 import RejectionCheckPage from '../features/rejection-check/pages/RejectionCheckPage';
 import ResourcesPage from '../features/resources/pages/ResourcesPage';
 import PluginsPage from '../features/plugins/pages/PluginsPage';
 import SettingsPage from '../features/settings/pages/SettingsPage';
 import TechnicalPlanHome from '../features/technical-plan/pages/TechnicalPlanHome';
+import PastBidTemplatePage from '../features/past-bid-template/pages/PastBidTemplatePage';
 import FeasibilityReportHome from '../features/feasibility-report/pages/FeasibilityReportHome';
 import SecondaryMenuPage from '../shared/ui/SecondaryMenuPage';
 
@@ -50,12 +52,16 @@ function AppRouter({ activeSection, developerMode, onDeveloperModeChange, onSect
       return <TechnicalPlanHome workflowKind="technical-plan" registerLeaveGuard={registerLeaveGuard} onSectionChange={onSectionChange} />;
     case 'existing-plan-expansion':
       return <TechnicalPlanHome workflowKind="existing-plan-expansion" registerLeaveGuard={registerLeaveGuard} onSectionChange={onSectionChange} />;
+    case 'past-bid-template':
+      return <PastBidTemplatePage onSectionChange={onSectionChange} />;
     case 'feasibility-report':
       return <FeasibilityReportHome registerLeaveGuard={registerLeaveGuard} onSectionChange={onSectionChange} />;
     case 'business-bid':
       return <BusinessBidPage />;
     case 'document-knowledge-base':
       return <KnowledgeBasePage />;
+    case 'image-knowledge-base':
+      return <ImageLibraryPage onSectionChange={onSectionChange} />;
     case 'resources':
       return <ResourcesPage />;
     case 'plugin-manager':

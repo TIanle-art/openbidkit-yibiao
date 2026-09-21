@@ -547,10 +547,29 @@ async function parseDocumentWithConfig(app, filePath, config, options = {}) {
   const parseOptions = { preserveImages, assets, imageResolver: createImageResolver(assets) };
   let markdown = '';
   try {
-    if (provider === 'mineru-agent-api') {
-      markdown = await parseWithMineruAgent(filePath, parseOptions);
-    } else if (provider === 'mineru-accurate-api') {
-      markdown = await parseWithMineruAccurate(filePath, config.components?.file_parser?.mineru_token || '', parseOptions);
+    if (provider === 'mineru-agent-api' || provider === 'mineru-accurate-api') {
+      // MinerU 云端不可用（例如 API 与 Worker 版本不匹配）时，若本地也能解析该格式则自动回退本地。
+      try {
+        if (provider === 'mineru-agent-api') {
+          markdown = await parseWithMineruAgent(filePath, parseOptions);
+        } else {
+          markdown = await parseWithMineruAccurate(filePath, config.components?.file_parser?.mineru_token || '', parseOptions);
+        }
+      } catch (mineruError) {
+        if (localSupportedExtensions.has(path.extname(filePath).toLowerCase())) {
+          developerLogger.write('file.parse.mineru.fallback', {
+            file: await summarizeFileForLog(filePath),
+            reason: compactLogError(mineruError),
+            fallback_provider: 'local',
+          });
+          const localMarkdown = await parseLocalDocument(filePath, parseOptions);
+          markdown = preserveImages
+            ? await rewriteMarkdownImages(localMarkdown, assets, { localBaseDir: path.dirname(filePath) })
+            : stripMarkdownImages(localMarkdown);
+        } else {
+          throw mineruError;
+        }
+      }
     } else {
       markdown = await parseLocalDocument(filePath, parseOptions);
       markdown = preserveImages ? await rewriteMarkdownImages(markdown, assets, { localBaseDir: path.dirname(filePath) }) : stripMarkdownImages(markdown);

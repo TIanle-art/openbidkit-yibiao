@@ -12,12 +12,17 @@ import iconv from 'iconv-lite';
 import mammoth from 'mammoth';
 import { lookup as lookupMimeType } from 'mime-types';
 import { PDFParse } from 'pdf-parse';
-import { getDocument, OPS } from 'pdfjs-dist/legacy/build/pdf.mjs';
+import { getDocument, GlobalWorkerOptions, OPS } from 'pdfjs-dist/legacy/build/pdf.mjs';
 import TurndownService from 'turndown';
 import turndownPluginGfm from 'turndown-plugin-gfm';
 import * as XLSX from 'xlsx';
 
 const MARKDOWN_SUFFIXES = new Set(['.md', '.markdown']);
+
+// 显式指定与当前 pdfjs-dist 版本（5.7.284）匹配的 worker，避免与 pdf-parse 内嵌的旧版
+// worker（5.4.296）发生版本不一致告警。
+const require = createRequire(import.meta.url);
+GlobalWorkerOptions.workerSrc = require.resolve('pdfjs-dist/legacy/build/pdf.worker.mjs');
 const DOCX_SUFFIXES = new Set(['.docx']);
 const PDF_SUFFIXES = new Set(['.pdf']);
 const LEGACY_WORD_SUFFIXES = new Set(['.doc', '.wps']);

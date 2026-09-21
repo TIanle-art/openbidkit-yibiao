@@ -351,8 +351,13 @@ function formatBidAnalysisFactForPrompt(storedPlan, itemId, label) {
 function formatBidAnalysisFactsForPrompt(storedPlan) {
   return [
     formatBidAnalysisFactForPrompt(storedPlan, 'projectInfo', '项目信息'),
-    formatBidAnalysisFactForPrompt(storedPlan, 'partAInfo', '甲方信息'),
+    formatBidAnalysisFactForPrompt(storedPlan, 'partAInfo', '招标人/甲方信息'),
+    formatBidAnalysisFactForPrompt(storedPlan, 'agentInfo', '招标代理机构信息'),
+    formatBidAnalysisFactForPrompt(storedPlan, 'keyInfo', '投标关键节点与时间'),
+    formatBidAnalysisFactForPrompt(storedPlan, 'marginInfo', '投标保证金要求'),
     formatBidAnalysisFactForPrompt(storedPlan, 'deliveryAndServiceRequirements', '交货和服务要求'),
+    formatBidAnalysisFactForPrompt(storedPlan, 'procurementList', '采购需求与规格清单摘要'),
+    formatBidAnalysisFactForPrompt(storedPlan, 'responseFileRequirements', '响应文件编制与组成要求'),
   ].filter(Boolean).join('\n\n') || '未提供 Step02 关键解析结果。';
 }
 

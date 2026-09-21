@@ -19,4 +19,6 @@
 @import './styles/feature-resources.css';
 @import './styles/feature-export-format.css';
 @import './styles/feature-plugins.css';
+@import './styles/feature-past-bid-template.css';
+@import './styles/feature-image-library.css';
 @import './styles/feature-developer.css';

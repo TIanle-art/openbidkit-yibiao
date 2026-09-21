@@ -2,7 +2,7 @@ export type TextModelProvider = 'jinlong' | 'volcengine' | 'deepseek' | 'agnes' 
 export type LegacyTextModelProvider = 'longcat';
 export type ConfiguredTextModelProvider = TextModelProvider | LegacyTextModelProvider;
 export type AiRequestMode = 'normal' | 'stream';
-export type UpdateChannel = 'github' | 'cloudflare' | 'atomgit';
+export type UpdateChannel = 'cloudflare';
 
 export interface TextModelConfig {
   api_key: string;
@@ -45,7 +45,8 @@ export interface ImageModelTestResult {
 
 export type ImageModelProvider = 'jinlong' | 'volcengine' | 'google-ai-studio' | 'agnes' | 'custom' | 'comfyui';
 export type ImageModelStatus = 'untested' | 'available' | 'unavailable';
-export type ImageModelSize = 'auto' | '512' | '1K' | '2K' | '4K' | '1024x1024' | '1536x1024' | '1024x1536' | '2048x2048' | '2048x1152' | '3840x2160' | '2160x3840';
+export type ImageModelSize = 'auto' | '512' | '1K' | '2K' | '3K' | '4K' | '1024x768' | '1024x1024' | '768x1024' | '1536x1024' | '1024x1536' | '2048x2048' | '2048x1152' | '3840x2160' | '2160x3840';
+export type ImageModelRatio = '1:1' | '3:4' | '4:3' | '16:9' | '9:16' | '2:3' | '3:2' | '21:9';
 
 export interface ImageModelConfig {
   provider: ImageModelProvider;
@@ -53,6 +54,7 @@ export interface ImageModelConfig {
   api_key: string;
   model_name: string;
   image_size: ImageModelSize;
+  image_ratio?: ImageModelRatio;
   request_mode: AiRequestMode;
   concurrency_limit: number;
   comfyui_workflow?: string;

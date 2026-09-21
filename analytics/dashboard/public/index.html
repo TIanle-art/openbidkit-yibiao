@@ -95,13 +95,6 @@
             <div class="panel card"><span>7 日新增客户端</span><strong id="last7NewClients">0</strong></div>
           </section>
 
-          <section class="cards">
-            <div class="panel card"><span>GitHub Stars</span><strong id="githubStars">-</strong></div>
-            <div class="panel card"><span>GitHub Forks</span><strong id="githubForks">-</strong></div>
-            <div class="panel card"><span>Issues / PRs</span><strong id="githubOpenIssues">-</strong></div>
-            <div class="panel card"><span>GitHub 仓库</span><strong><a id="githubRepoUrl" class="card-link" href="https://github.com/FB208/OpenBidKit_Yibiao" target="_blank" rel="noopener noreferrer">打开仓库</a></strong></div>
-          </section>
-
           <section class="grid">
             <div class="panel section">
               <h2>每日统计</h2>
@@ -351,7 +344,7 @@
             <div class="notice-form">
               <label>
                 公告标题
-                <input id="noticeTitle" maxlength="120" placeholder="例如：开源许可证提醒" />
+                <input id="noticeTitle" maxlength="120" placeholder="例如：许可证到期提醒" />
               </label>
               <label>
                 状态
@@ -533,7 +526,7 @@
               <input id="pluginId" type="hidden" />
               <label class="plugin-field-wide">
                 GitHub 仓库地址 *
-                <input id="pluginRepository" maxlength="300" placeholder="例如：https://github.com/FB208/OpenBidKit-plugin-pet" required />
+                <input id="pluginRepository" maxlength="300" placeholder="例如：https://example.com/plugin-repo" required />
                 <small>自动读取 Tag 对应的 manifest.json、最新正式 Release 和安装包地址。</small>
               </label>
               <label>

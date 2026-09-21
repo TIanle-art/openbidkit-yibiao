@@ -1,6 +1,5 @@
 import * as Dialog from '@radix-ui/react-dialog';
 import { useEffect, useState, type FormEvent } from 'react';
-import { trackResourceClick } from '../../../shared/analytics/analytics';
 import { EmptyState, MarkdownFullscreenViewer, MarkdownRenderer, useToast } from '../../../shared/ui';
 
 interface ResourceItem {
@@ -94,7 +93,6 @@ function ResourcesPage() {
                 className="resource-book-row"
                 key={item.id}
                 onClick={() => {
-                  trackResourceClick(item.analyticsKey);
                   setSelectedResource(item);
                 }}
                 aria-label={`查看资源：${item.title}`}

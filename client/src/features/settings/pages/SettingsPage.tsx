@@ -1,9 +1,8 @@
 import { useEffect, useState } from 'react';
-import { trackConfigUsage } from '../../../shared/analytics/analytics';
 import { AppSwitch, DetailHelpLink, FloatingToolbar, InlineSpinner, InputWithAction, OfflineLicenseActivationDialog, useAutoAnswer, useToast } from '../../../shared/ui';
 import { showUpdateReadyToast } from '../../../shared/updateToast';
 import type { FloatingToolbarGroup } from '../../../shared/ui';
-import type { AgentModeScenariosConfig, AgentSelfCheckResult, AgentSelfCheckStepStatus, AiRequestMode, ClientConfig, ComponentsConfig, ConfiguredTextModelProvider, FileParserProvider, ImageModelConfig, ImageModelProfiles, ImageModelProvider, ImageModelSize, ImageModelStatus, LicenseRuntimeStatus, TextModelConfig, TextModelProfiles, TextModelProvider, UpdateChannel } from '../../../shared/types';
+import type { AgentModeScenariosConfig, AgentSelfCheckResult, AgentSelfCheckStepStatus, AiRequestMode, ClientConfig, ComponentsConfig, ConfiguredTextModelProvider, FileParserProvider, ImageModelConfig, ImageModelProfiles, ImageModelProvider, ImageModelRatio, ImageModelSize, ImageModelStatus, LicenseRuntimeStatus, TextModelConfig, TextModelProfiles, TextModelProvider, UpdateChannel } from '../../../shared/types';
 import type { SettingsPageState } from '../types';
 
 type SettingsTab = 'general' | 'text-model' | 'image-model' | 'components' | 'agent' | 'about';
@@ -37,9 +36,7 @@ const agentDiagnosticStatusMeta: Record<AgentSelfCheckStepStatus, { label: strin
 };
 
 const updateChannelOptions: Array<{ value: UpdateChannel; label: string; description: string }> = [
-  { value: 'github', label: 'GitHub', description: '使用 GitHub Release 检查和下载更新' },
-  { value: 'cloudflare', label: 'Cloudflare', description: '使用 Cloudflare R2 镜像检查和下载更新' },
-  { value: 'atomgit', label: 'AtomGit', description: '使用 AtomGit Release 检查和下载更新' },
+  { value: 'cloudflare', label: 'Cloudflare', description: '使用 Cloudflare 更新源检查和下载更新' },
 ];
 
 const defaultAgentModeScenarios: AgentModeScenariosConfig = {
@@ -47,10 +44,10 @@ const defaultAgentModeScenarios: AgentModeScenariosConfig = {
 };
 
 function normalizeUpdateChannel(value?: string): UpdateChannel {
-  if (value === 'cloudflare' || value === 'atomgit') {
+  if (value === 'cloudflare') {
     return value;
   }
-  return 'atomgit';
+  return 'cloudflare';
 }
 
 function normalizeAgentModeScenarios(value?: Partial<AgentModeScenariosConfig>): AgentModeScenariosConfig {
@@ -219,14 +216,44 @@ const googleImageSizeOptions: Array<{ value: ImageModelSize; label: string }> = 
   { value: '4K', label: '4K' },
 ];
 
-function getImageSizeOptions(provider: ImageModelProvider) {
+const agnesImage20SizeOptions: Array<{ value: ImageModelSize; label: string }> = [
+  { value: '1024x1024', label: '1024×1024（方图）' },
+  { value: '1024x768', label: '1024×768（横图）' },
+  { value: '768x1024', label: '768×1024（竖图）' },
+];
+
+const agnesImage21SizeOptions: Array<{ value: ImageModelSize; label: string }> = [
+  { value: '1K', label: '1K' },
+  { value: '2K', label: '2K' },
+  { value: '3K', label: '3K' },
+  { value: '4K', label: '4K' },
+];
+
+const agnesImageRatioOptions: Array<{ value: ImageModelRatio; label: string }> = [
+  { value: '1:1', label: '1:1（方图）' },
+  { value: '3:4', label: '3:4（竖图）' },
+  { value: '4:3', label: '4:3（横图）' },
+  { value: '16:9', label: '16:9（宽屏）' },
+  { value: '9:16', label: '9:16（竖屏）' },
+  { value: '2:3', label: '2:3（竖图）' },
+  { value: '3:2', label: '3:2（横图）' },
+  { value: '21:9', label: '21:9（超宽屏）' },
+];
+
+function getImageSizeOptions(provider: ImageModelProvider, modelName = '') {
   if (provider === 'google-ai-studio') return googleImageSizeOptions;
   if (provider === 'comfyui') return openAICompatibleImageSizeOptions.filter((option) => option.value !== 'auto');
+  if (provider === 'agnes' && modelName === 'agnes-image-2.1-flash') return agnesImage21SizeOptions;
+  if (provider === 'agnes') return agnesImage20SizeOptions;
   return openAICompatibleImageSizeOptions;
 }
 
 function normalizeImageSize(provider: ImageModelProvider, value?: string): ImageModelSize {
-  const options = getImageSizeOptions(provider);
+  const options = provider === 'google-ai-studio'
+    ? googleImageSizeOptions
+    : provider === 'agnes'
+      ? [...openAICompatibleImageSizeOptions, ...agnesImage20SizeOptions, ...agnesImage21SizeOptions]
+      : openAICompatibleImageSizeOptions;
   const candidate = String(value || '').trim() as ImageModelSize;
   return options.some((option) => option.value === candidate)
     ? candidate
@@ -276,7 +303,8 @@ const imageProviderDefaults: ImageModelProfiles = {
     api_key: '',
     model_name: '',
     image_size: '1024x1024',
-    request_mode: 'stream',
+    image_ratio: '1:1',
+    request_mode: 'normal',
     concurrency_limit: DEFAULT_IMAGE_CONCURRENCY_LIMIT,
     status: 'untested',
     tested_at: '',
@@ -379,6 +407,7 @@ function normalizeImageModelProfile(provider: ImageModelProvider, profile?: Part
     api_key: profile?.api_key ?? defaults.api_key,
     model_name: useProviderDefaultImageModel ? defaults.model_name : profile?.model_name ?? defaults.model_name,
     image_size: normalizeImageSize(provider, useProviderDefaultImageModel ? defaults.image_size : profile?.image_size ?? defaults.image_size),
+    ...(provider === 'agnes' ? { image_ratio: profile?.image_ratio ?? defaults.image_ratio ?? '1:1' } : {}),
     request_mode: normalizeAiRequestMode(useProviderDefaultImageModel ? defaults.request_mode : profile?.request_mode ?? defaults.request_mode),
     concurrency_limit: normalizeImageConcurrencyLimit(profile?.concurrency_limit ?? defaults.concurrency_limit),
     comfyui_workflow: profile?.comfyui_workflow ?? defaults.comfyui_workflow ?? '',
@@ -456,6 +485,7 @@ function imageProfileFromState(imageModel: SettingsPageState['imageModel']): Ima
     api_key: imageModel.api_key,
     model_name: imageModel.model_name,
     image_size: normalizeImageSize(imageModel.provider, imageModel.image_size),
+    ...(imageModel.provider === 'agnes' ? { image_ratio: imageModel.image_ratio || '1:1' } : {}),
     request_mode: imageModel.request_mode,
     concurrency_limit: normalizeImageConcurrencyLimit(imageModel.concurrency_limit),
     comfyui_workflow: imageModel.comfyui_workflow || '',
@@ -576,7 +606,7 @@ const initialState: SettingsPageState = {
     developer_mode: false,
     developer_token_stats_auto_open: false,
     developer_agent_monitor_auto_open: false,
-    update_channel: 'atomgit',
+    update_channel: 'cloudflare',
     gpu_hardware_acceleration_enabled: true,
     gpu_hardware_acceleration_configured: true,
   },
@@ -840,7 +870,6 @@ function SettingsPage({ onDeveloperModeChange }: SettingsPageProps) {
       if (result?.success) {
         setSavedConfig(config);
         onDeveloperModeChange?.(Boolean(config.developer_mode));
-        trackConfigUsage({}, config);
       }
       return Boolean(result?.success);
     } catch (error) {
@@ -1125,7 +1154,6 @@ function SettingsPage({ onDeveloperModeChange }: SettingsPageProps) {
         },
       }));
       setSavedConfig(testedConfig);
-      trackConfigUsage({}, testedConfig);
       const previewSrc = result?.image_url || (result?.image_data ? `data:${result.mime_type || 'image/png'};base64,${result.image_data}` : '');
 
       if (previewSrc) {
@@ -1160,7 +1188,6 @@ function SettingsPage({ onDeveloperModeChange }: SettingsPageProps) {
         },
       }));
       setSavedConfig(failedConfig);
-      trackConfigUsage({}, failedConfig);
       showToast(message, 'error');
     } finally {
       setTestingImageModel(false);
@@ -1563,6 +1590,8 @@ function SettingsPage({ onDeveloperModeChange }: SettingsPageProps) {
     return '启动后自动检查，每 30 分钟轮询';
   })();
   const licenseSourceLabel = getLicenseSourceLabel(licenseStatus);
+  const currentImageSizeOptions = getImageSizeOptions(state.imageModel.provider, state.imageModel.model_name);
+  const currentImageSizeSupported = currentImageSizeOptions.some((option) => option.value === state.imageModel.image_size);
 
   return (
     <div className="settings-page">
@@ -2024,17 +2053,46 @@ function SettingsPage({ onDeveloperModeChange }: SettingsPageProps) {
             <label className="settings-row">
               <div className="settings-row-copy">
                 <strong>图片尺寸</strong>
-                <span>{state.imageModel.provider === 'google-ai-studio' ? '使用 Google AI Studio 官方 imageSize 枚举' : state.imageModel.provider === 'comfyui' ? '尺寸会注入工作流的 Latent 节点（宽×高）' : '使用 OpenAI Image API 官方常用尺寸枚举'}</span>
+                <span>{state.imageModel.provider === 'google-ai-studio'
+                  ? '使用 Google AI Studio 官方 imageSize 枚举'
+                  : state.imageModel.provider === 'comfyui'
+                    ? '尺寸会注入工作流的 Latent 节点（宽×高）'
+                    : state.imageModel.provider === 'agnes' && state.imageModel.model_name === 'agnes-image-2.1-flash'
+                      ? 'Agnes Image 2.1 Flash 使用 1K 至 4K 尺寸档位'
+                      : state.imageModel.provider === 'agnes'
+                        ? 'Agnes Image 2.0 Flash 使用官方支持的具体尺寸'
+                        : '使用 OpenAI Image API 官方常用尺寸枚举'}</span>
               </div>
               <select
-                value={normalizeImageSize(state.imageModel.provider, state.imageModel.image_size)}
+                value={state.imageModel.image_size}
                 onChange={(event) => updateImageModelConfig({ image_size: event.target.value as ImageModelSize })}
               >
-                {getImageSizeOptions(state.imageModel.provider).map((option) => (
+                {!currentImageSizeSupported && (
+                  <option value={state.imageModel.image_size} disabled>
+                    {state.imageModel.image_size}（当前模型不支持，请重新选择）
+                  </option>
+                )}
+                {currentImageSizeOptions.map((option) => (
                   <option value={option.value} key={option.value}>{option.label}</option>
                 ))}
               </select>
             </label>
+            {state.imageModel.provider === 'agnes' && state.imageModel.model_name === 'agnes-image-2.1-flash' && (
+              <label className="settings-row">
+                <div className="settings-row-copy">
+                  <strong>图片宽高比</strong>
+                  <span>与 1K 至 4K 尺寸档位配合使用</span>
+                </div>
+                <select
+                  value={state.imageModel.image_ratio || '1:1'}
+                  onChange={(event) => updateImageModelConfig({ image_ratio: event.target.value as ImageModelRatio })}
+                >
+                  {agnesImageRatioOptions.map((option) => (
+                    <option value={option.value} key={option.value}>{option.label}</option>
+                  ))}
+                </select>
+              </label>
+            )}
             <label className="settings-row">
               <div className="settings-row-copy">
                 <strong>并发上限</strong>
@@ -2053,14 +2111,18 @@ function SettingsPage({ onDeveloperModeChange }: SettingsPageProps) {
             <label className="settings-row">
               <div className="settings-row-copy">
                 <strong>请求方式</strong>
-                <span>流式请求只影响后端调用方式，应用仍等待完整图片生成后继续流程</span>
+                <span>{state.imageModel.provider === 'agnes'
+                  ? 'Agnes 生图接口使用普通请求'
+                  : '流式请求只影响后端调用方式，应用仍等待完整图片生成后继续流程'}</span>
               </div>
               <select
                 value={state.imageModel.request_mode}
                 onChange={(event) => updateImageModelConfig({ request_mode: event.target.value as AiRequestMode })}
               >
                 {aiRequestModeOptions.map((option) => (
-                  <option value={option.value} key={option.value}>{option.label}</option>
+                  <option value={option.value} key={option.value} disabled={state.imageModel.provider === 'agnes' && option.value === 'stream'}>
+                    {option.label}{state.imageModel.provider === 'agnes' && option.value === 'stream' ? '（Agnes 不支持）' : ''}
+                  </option>
                 ))}
               </select>
             </label>
@@ -2371,17 +2433,6 @@ function SettingsPage({ onDeveloperModeChange }: SettingsPageProps) {
               <span>信息与授权</span>
               <ul className="about-links-list">
                 <li className="about-links-item">
-                  <span className="about-links-label">GitHub 仓库</span>
-                  <a
-                    className="about-links-value is-link"
-                    href="https://github.com/FB208/OpenBidKit_Yibiao"
-                    target="_blank"
-                    rel="noreferrer"
-                  >
-                    FB208/OpenBidKit_Yibiao
-                  </a>
-                </li>
-                <li className="about-links-item">
                   <span className="about-links-label">使用文档</span>
                   <a
                     className="about-links-value is-link"
@@ -2424,7 +2475,7 @@ function SettingsPage({ onDeveloperModeChange }: SettingsPageProps) {
               <article className="privacy-item">
                 <span>03</span>
                 <strong>匿名埋点只用于了解功能使用情况</strong>
-                <p>为了判断开源项目是否有人使用、哪些功能更常用，应用会把匿名页面访问和功能使用次数上报到 Cloudflare。统计不包含文档内容、文件名、本地路径、API Key、用户输入、生成结果或任何可还原业务内容的信息。</p>
+                <p>为了判断客户端是否有人使用、哪些功能更常用，应用会把匿名页面访问和功能使用次数上报到 Cloudflare。统计不包含文档内容、文件名、本地路径、API Key、用户输入、生成结果或任何可还原业务内容的信息。</p>
               </article>
             </div>
           </div>

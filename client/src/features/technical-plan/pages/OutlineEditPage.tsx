@@ -1,14 +1,14 @@
 import * as Dialog from '@radix-ui/react-dialog';
 import { useEffect, useRef, useState } from 'react';
 import type { CSSProperties, DragEvent } from 'react';
-import { trackConfigUsage } from '../../../shared/analytics/analytics';
 import { AppSwitch, ProgressBar, useToast } from '../../../shared/ui';
-import type { BackgroundTaskState, OutlineSelectionItem, SaveOutlineRequest, SaveOutlineSelectionRequest, TechnicalPlanWorkflowKind } from '../types';
+import type { BackgroundTaskState, BidPlanState, BidQualityCheckState, OutlineSelectionItem, SaveOutlineRequest, SaveOutlineSelectionRequest, TechnicalPlanWorkflowKind } from '../types';
 import type { KnowledgeBaseIndex, KnowledgeDocument } from '../../knowledge-base/types';
 import { OUTLINE_CONTENT_MODE_LABELS } from '../../../shared/types';
 import type { OutlineContentMode, OutlineData, OutlineExpansionMode, OutlineItem, OutlineMode, OutlineWordControlOptions } from '../../../shared/types';
 import type { ExportFormatConfig } from '../../../shared/types/exportFormat';
 import { DEFAULT_EXPORT_FORMAT } from '../../../shared/types/exportFormat';
+import type { PastBidTemplateRecord } from '../../../shared/types/ipc';
 import { formatOutlineTitle } from '../../../shared/utils/outlineNumbering';
 import OutlineSelectionDialog from '../components/OutlineSelectionDialog';
 
@@ -20,11 +20,14 @@ interface OutlineEditPageProps {
   outlineWordControlOptions: OutlineWordControlOptions;
   outlineWordControlSnapshot?: OutlineWordControlOptions;
   referenceKnowledgeDocumentIds: string[];
+  referencePastBidTemplateId?: string;
   outlineData: OutlineData | null;
+  bidPlan?: BidPlanState;
+  qualityCheck?: BidQualityCheckState;
   task?: BackgroundTaskState;
   contentTaskStatus?: BackgroundTaskState['status'];
   aiAdjustmentRunning?: boolean;
-  onOutlineConfigChange: (config: { referenceKnowledgeDocumentIds: string[]; outlineMode: OutlineMode; outlineExpansionMode: OutlineExpansionMode; wordControlOptions: OutlineWordControlOptions }) => Promise<void>;
+  onOutlineConfigChange: (config: { referenceKnowledgeDocumentIds: string[]; referencePastBidTemplateId?: string; outlineMode: OutlineMode; outlineExpansionMode: OutlineExpansionMode; wordControlOptions: OutlineWordControlOptions }) => Promise<void>;
   onOutlineSaved: (request: SaveOutlineRequest) => Promise<void>;
   onOutlineSelectionSaved: (request: SaveOutlineSelectionRequest) => Promise<void>;
   onOpenBidTemplate?: () => Promise<void>;
@@ -85,6 +88,19 @@ const technicalDocumentModeOptions: Array<{ value: Extract<OutlineMode, 'respons
     description: '一级目录直接从技术评分大项开始，不再创建技术方案、项目管理方案、监理大纲、施工组织设计或技术标等外层总目录。',
   },
 ];
+const projectTypeLabels: Record<BidPlanState['project_type']['primary'], string> = {
+  equipment_procurement: '设备采购',
+  goods_procurement: '货物采购',
+  engineering: '工程',
+  service: '服务',
+  software_it: '软件与信息化',
+  mixed: '混合项目',
+};
+const responseTableLabels: Record<BidPlanState['required_tables'][number]['type'], string> = {
+  technical_parameter_response: '技术参数响应表',
+  technical_deviation: '技术偏离表',
+  supply_scope: '供货范围表',
+};
 
 const WORD_COUNT_INPUT_UNIT = 10000;
 
@@ -341,7 +357,10 @@ function OutlineEditPage({
   outlineWordControlOptions,
   outlineWordControlSnapshot,
   referenceKnowledgeDocumentIds,
+  referencePastBidTemplateId = '',
   outlineData,
+  bidPlan,
+  qualityCheck,
   task,
   contentTaskStatus,
   aiAdjustmentRunning = false,
@@ -365,6 +384,8 @@ function OutlineEditPage({
   const [draftOutlineMode, setDraftOutlineMode] = useState<OutlineMode>(outlineMode === 'standalone-technical' ? 'standalone-technical' : 'response-file');
   const [draftOutlineExpansionMode, setDraftOutlineExpansionMode] = useState<OutlineExpansionMode>(outlineExpansionMode);
   const [draftKnowledgeDocumentIds, setDraftKnowledgeDocumentIds] = useState<string[]>(referenceKnowledgeDocumentIds);
+  const [pastBidTemplates, setPastBidTemplates] = useState<PastBidTemplateRecord[]>([]);
+  const [draftPastBidTemplateId, setDraftPastBidTemplateId] = useState<string>(referencePastBidTemplateId);
   const [draftMinimumWords, setDraftMinimumWords] = useState(formatWordCountDraft(outlineWordControlOptions.minimumWords));
   const [draftMaximumWords, setDraftMaximumWords] = useState(formatWordCountDraft(outlineWordControlOptions.maximumWords));
   const [draftSectionWords, setDraftSectionWords] = useState(formatWordCountDraft(outlineWordControlOptions.sectionWords));
@@ -440,6 +461,7 @@ function OutlineEditPage({
   };
   const wordControlRequiresRegeneration = Boolean(outlineData && !areWordControlOptionsEqual(normalizedDraftOptions, outlineWordControlSnapshot));
   const outlineModeRequiresRegeneration = Boolean(outlineData && !isExpansionWorkflow && draftOutlineMode !== outlineMode);
+  const technicalCoverage = qualityCheck?.technical_coverage || task?.stats?.outline?.technical_coverage;
 
   const initializeWordControlDraft = () => {
     setDraftMinimumWords(formatWordCountDraft(outlineWordControlOptions.minimumWords));
@@ -520,10 +542,12 @@ function OutlineEditPage({
     setDraftOutlineMode(outlineMode === 'standalone-technical' ? 'standalone-technical' : 'response-file');
     setDraftOutlineExpansionMode(isExpansionWorkflow ? outlineExpansionMode : 'ai-complement');
     setDraftKnowledgeDocumentIds(referenceKnowledgeDocumentIds);
+    setDraftPastBidTemplateId(referencePastBidTemplateId);
     initializeWordControlDraft();
     setKnowledgeSearch('');
     void loadKnowledgeIndex();
-  }, [generationDialogOpen, isExpansionWorkflow, outlineMode, outlineExpansionMode, outlineWordControlOptions, referenceKnowledgeDocumentIds]);
+    void loadPastBidTemplates();
+  }, [generationDialogOpen, isExpansionWorkflow, outlineMode, outlineExpansionMode, outlineWordControlOptions, referenceKnowledgeDocumentIds, referencePastBidTemplateId]);
 
   const loadKnowledgeIndex = async () => {
     try {
@@ -537,6 +561,15 @@ function OutlineEditPage({
       setExpandedKnowledgeFolderIds(new Set());
     } finally {
       setLoadingKnowledge(false);
+    }
+  };
+
+  const loadPastBidTemplates = async () => {
+    try {
+      const items = await window.yibiao?.pastBidTemplate?.list();
+      setPastBidTemplates(items || []);
+    } catch {
+      setPastBidTemplates([]);
     }
   };
 
@@ -558,6 +591,7 @@ function OutlineEditPage({
     setDraftOutlineMode(outlineMode === 'standalone-technical' ? 'standalone-technical' : 'response-file');
     setDraftOutlineExpansionMode(isExpansionWorkflow ? outlineExpansionMode : 'ai-complement');
     setDraftKnowledgeDocumentIds(referenceKnowledgeDocumentIds);
+    setDraftPastBidTemplateId(referencePastBidTemplateId);
     initializeWordControlDraft();
     setKnowledgeSearch('');
     setGenerationDialogOpen(true);
@@ -621,6 +655,7 @@ function OutlineEditPage({
       const nextOutlineExpansionMode = isExpansionWorkflow ? draftOutlineExpansionMode : 'ai-complement';
       await onOutlineConfigChange({
         referenceKnowledgeDocumentIds: draftKnowledgeDocumentIds,
+        referencePastBidTemplateId: draftPastBidTemplateId || undefined,
         outlineMode: nextOutlineMode,
         outlineExpansionMode: nextOutlineExpansionMode,
         wordControlOptions,
@@ -628,17 +663,10 @@ function OutlineEditPage({
       setGenerationDialogOpen(false);
       await window.yibiao?.tasks.startOutlineGeneration({
         reference_knowledge_document_ids: draftKnowledgeDocumentIds,
+        reference_past_bid_template_id: draftPastBidTemplateId || undefined,
         outline_mode: nextOutlineMode,
         outline_expansion_mode: nextOutlineExpansionMode,
         word_control_options: wordControlOptions,
-      });
-      trackConfigUsage({
-        outline_mode: isExpansionWorkflow ? nextOutlineExpansionMode : nextOutlineMode,
-        word_control_enabled: wordControlOptions.minimumWords > 0 || wordControlOptions.maximumWords > 0 || wordControlOptions.sectionWords > 0,
-        minimum_words: wordControlOptions.minimumWords,
-        maximum_words: wordControlOptions.maximumWords,
-        section_words: wordControlOptions.sectionWords,
-        strict_section_words: wordControlOptions.strictSectionWords,
       });
       showToast('目录生成任务已在后台启动', 'success');
     } catch (error) {
@@ -1278,6 +1306,39 @@ function OutlineEditPage({
         </div>
       </section>
 
+      {bidPlan && (
+        <section className="bid-planning-summary" aria-label="Bid Planning 摘要">
+          <div className="bid-planning-metric">
+            <span>项目类型</span>
+            <strong>{projectTypeLabels[bidPlan.project_type.primary]}</strong>
+            <small>{bidPlan.project_type.secondary.length ? bidPlan.project_type.secondary.join(' / ') : '单一类型'}</small>
+          </div>
+          <div className="bid-planning-metric">
+            <span>技术主题</span>
+            <strong>{bidPlan.technical_topics.length}</strong>
+            <small>已保留招标来源</small>
+          </div>
+          <div className={`bid-planning-metric${technicalCoverage && technicalCoverage.coverage_score < 90 ? ' is-warning' : ''}`}>
+            <span>技术需求覆盖</span>
+            <strong>{technicalCoverage ? `${technicalCoverage.coverage_score}%` : '待生成'}</strong>
+            <small>{technicalCoverage ? `${technicalCoverage.covered_count}/${technicalCoverage.total_count} 个主题已覆盖` : '目录生成后自动检查'}</small>
+          </div>
+          <div className="bid-planning-metric">
+            <span>必需响应表</span>
+            <strong>{bidPlan.required_tables.length}</strong>
+            <small>{bidPlan.required_tables.map((table) => responseTableLabels[table.type]).join('、') || '无'}</small>
+          </div>
+          <details className="bid-planning-details">
+            <summary>查看规划依据</summary>
+            <div>
+              <p><strong>主要技术主题：</strong>{bidPlan.technical_topics.map((topic) => topic.title).join('、')}</p>
+              {technicalCoverage?.partially_covered_topics.length ? <p><strong>部分覆盖：</strong>{technicalCoverage.partially_covered_topics.map((topic) => topic.title).join('、')}</p> : null}
+              {technicalCoverage?.missing_topics.length ? <p className="is-warning"><strong>未覆盖：</strong>{technicalCoverage.missing_topics.map((topic) => topic.title).join('、')}</p> : null}
+            </div>
+          </details>
+        </section>
+      )}
+
       <section className="outline-generation-workspace">
         <aside className="outline-progress-panel">
           <div className="analysis-result-head">
@@ -1520,14 +1581,34 @@ function OutlineEditPage({
                   )}
                 </section>
               </div>
-              {/* 右栏：知识库选择器 */}
-              <section className="outline-generation-config-section outline-knowledge-picker">
-                <div className="outline-generation-config-head">
-                  <strong>参考知识库</strong>
-                  <span>已选择 {draftKnowledgeDocumentIds.length} 个文档</span>
-                </div>
-                {renderKnowledgePicker()}
-              </section>
+              {/* 右栏：参考历史标书内容模板 + 参考知识库 */}
+              <div className="outline-generation-config-right">
+                <section className="outline-generation-config-section">
+                  <div className="outline-generation-config-head">
+                    <strong>参考历史标书内容模板</strong>
+                    <span>{draftPastBidTemplateId ? '已选择 1 份' : '未选择'}</span>
+                  </div>
+                  <select
+                    className="outline-knowledge-search"
+                    value={draftPastBidTemplateId}
+                    onChange={(event) => setDraftPastBidTemplateId(event.target.value)}
+                    disabled={knowledgePickingDisabled}
+                  >
+                    <option value="">不参考内容模板</option>
+                    {pastBidTemplates.map((template) => (
+                      <option key={template.template_id} value={template.template_id}>{template.template_name}</option>
+                    ))}
+                  </select>
+                  <p className="outline-config-hint">生成目录时会参考该内容模板的章节骨架、要点与专业写法；若其结构与招标要求冲突，以招标要求为准。</p>
+                </section>
+                <section className="outline-generation-config-section outline-knowledge-picker">
+                  <div className="outline-generation-config-head">
+                    <strong>参考知识库</strong>
+                    <span>已选择 {draftKnowledgeDocumentIds.length} 个文档</span>
+                  </div>
+                  {renderKnowledgePicker()}
+                </section>
+              </div>
             </div>
 
             <div className="content-regenerate-actions">

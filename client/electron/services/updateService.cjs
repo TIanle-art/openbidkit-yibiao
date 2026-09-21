@@ -3,19 +3,8 @@ const http = require('node:http');
 const https = require('node:https');
 const path = require('node:path');
 
-const GITHUB_RELEASE_API = 'https://api.github.com/repos/FB208/OpenBidKit_Yibiao/releases/latest';
-const GITHUB_RELEASE_DOWNLOAD_URL = 'https://github.com/FB208/OpenBidKit_Yibiao/releases/latest';
-const GITHUB_PROVIDER_OPTIONS = {
-  provider: 'github',
-  owner: 'FB208',
-  repo: 'OpenBidKit_Yibiao',
-  releaseType: 'release',
-};
 const CLOUDFLARE_RELEASE_BASE_URL = 'https://openbidkit-oss.agnet.top/release';
 const CLOUDFLARE_LATEST_JSON_URL = `${CLOUDFLARE_RELEASE_BASE_URL}/latest.json`;
-const ATOMGIT_REPOSITORY_URL = 'https://atomgit.com/FB208/OpenBidKit_Yibiao';
-const ATOMGIT_RELEASE_API_BASE_URL = 'https://api.atomgit.com/api/v5/repos/FB208/OpenBidKit_Yibiao/releases';
-const ATOMGIT_LATEST_RELEASE_API = `${ATOMGIT_RELEASE_API_BASE_URL}/latest`;
 
 let autoUpdaterInstance = null;
 let downloadedUpdateVersion = '';
@@ -88,15 +77,12 @@ function compareVersions(a, b) {
 }
 
 function normalizeUpdateChannel(value) {
-  if (value === 'cloudflare' || value === 'atomgit') {
-    return value;
-  }
-  return 'atomgit';
+  return value === 'cloudflare' ? value : 'cloudflare';
 }
 
 function getUpdateChannel(configStore) {
   if (!configStore) {
-    return 'atomgit';
+    return 'cloudflare';
   }
   const config = configStore.load();
   return normalizeUpdateChannel(config.update_channel);
@@ -132,29 +118,6 @@ function requestJson(url, label, headers = {}) {
       reject(new Error('请求超时'));
     });
   });
-}
-
-async function fetchGithubLatestRelease() {
-  const release = await requestJson(GITHUB_RELEASE_API, 'GitHub API ');
-  const files = Array.isArray(release.assets)
-    ? release.assets.map((asset) => ({
-      name: asset.name || '',
-      url: asset.browser_download_url || '',
-      size: Number(asset.size || 0),
-      digest: asset.digest || '',
-    }))
-    : [];
-  const downloadFile = pickPlatformDownloadFile(files);
-  return {
-    channel: 'github',
-    version: release.tag_name?.replace(/^v/, '') || '',
-    name: release.name || '',
-    body: release.body || '',
-    published_at: release.published_at || '',
-    html_url: release.html_url || GITHUB_RELEASE_DOWNLOAD_URL,
-    download_url: downloadFile?.url || GITHUB_RELEASE_DOWNLOAD_URL,
-    files,
-  };
 }
 
 function getMacUpdateArch() {
@@ -221,72 +184,19 @@ async function fetchCloudflareLatestRelease() {
   };
 }
 
-// 创建无需客户端令牌的 AtomGit Release 附件下载地址。
-function createAtomGitAssetDownloadUrl(tagName, fileName) {
-  return `${ATOMGIT_RELEASE_API_BASE_URL}/${encodeURIComponent(tagName)}/attach_files/${encodeURIComponent(fileName)}/download`;
-}
-
-// 获取 AtomGit 最新 Release 及可下载附件。
-async function fetchAtomGitLatestRelease() {
-  const release = await requestJson(ATOMGIT_LATEST_RELEASE_API, 'AtomGit API ');
-  const tagName = String(release.tag_name || '');
-  const files = Array.isArray(release.assets)
-    ? release.assets.map((asset) => {
-      const name = String(asset.name || '');
-      return {
-        name,
-        url: tagName && name
-          ? createAtomGitAssetDownloadUrl(tagName, name)
-          : String(asset.browser_download_url || ''),
-        size: Number(asset.size || 0),
-      };
-    })
-    : [];
-  const downloadFile = pickPlatformDownloadFile(files);
-  return {
-    channel: 'atomgit',
-    version: tagName.replace(/^v/i, ''),
-    name: release.name || tagName,
-    body: release.body || '',
-    published_at: release.created_at || '',
-    html_url: ATOMGIT_REPOSITORY_URL,
-    download_url: downloadFile?.url || ATOMGIT_REPOSITORY_URL,
-    files,
-  };
-}
-
-function fetchLatestRelease(channel) {
-  if (channel === 'cloudflare') return fetchCloudflareLatestRelease();
-  if (channel === 'atomgit') return fetchAtomGitLatestRelease();
-  return fetchGithubLatestRelease();
-}
-
 async function getLatestVersion(options = {}) {
   const channel = getUpdateChannel(options.configStore);
-  return fetchLatestRelease(channel);
+  return fetchCloudflareLatestRelease();
 }
 
 async function getUpdateDownloadUrl(options = {}) {
-  const channel = getUpdateChannel(options.configStore);
-  if (channel === 'cloudflare') {
-    try {
-      const release = await fetchCloudflareLatestRelease();
-      return release.download_url || CLOUDFLARE_RELEASE_BASE_URL;
-    } catch (error) {
-      console.warn('[update] Cloudflare 下载地址获取失败，回退到 GitHub Release', error);
-      return GITHUB_RELEASE_DOWNLOAD_URL;
-    }
+  try {
+    const release = await fetchCloudflareLatestRelease();
+    return release.download_url || CLOUDFLARE_RELEASE_BASE_URL;
+  } catch (error) {
+    console.warn('[update] Cloudflare 下载地址获取失败', error);
+    return CLOUDFLARE_RELEASE_BASE_URL;
   }
-  if (channel === 'atomgit') {
-    try {
-      const release = await fetchAtomGitLatestRelease();
-      return release.download_url || ATOMGIT_REPOSITORY_URL;
-    } catch (error) {
-      console.warn('[update] AtomGit 下载地址获取失败', error);
-      return ATOMGIT_REPOSITORY_URL;
-    }
-  }
-  return GITHUB_RELEASE_DOWNLOAD_URL;
 }
 
 function configureAutoUpdater(channel) {
@@ -295,9 +205,7 @@ function configureAutoUpdater(channel) {
   }
   if (channel === 'cloudflare') {
     autoUpdaterInstance.setFeedURL({ provider: 'generic', url: CLOUDFLARE_RELEASE_BASE_URL });
-    return;
   }
-  autoUpdaterInstance.setFeedURL(GITHUB_PROVIDER_OPTIONS);
 }
 
 function formatErrorMessage(error) {
@@ -486,11 +394,11 @@ async function runManualInstallerUpdateCheck(options, release, channel) {
 async function runUpdateCheck(options = {}) {
   const { app, mainWindow, onProgress, onDownloaded, onError } = options;
   const channel = getUpdateChannel(options.configStore);
-  const release = await fetchLatestRelease(channel);
+  const release = await fetchCloudflareLatestRelease();
   if (!release.version || compareVersions(release.version, app.getVersion()) <= 0) {
     return { enabled: true, updateAvailable: false, channel };
   }
-  if (process.platform === 'darwin' || channel === 'atomgit') {
+  if (process.platform === 'darwin') {
     return runManualInstallerUpdateCheck(options, release, channel);
   }
   configureAutoUpdater(channel);
@@ -642,7 +550,7 @@ function setupAutoUpdate({ app, mainWindow }) {
   autoUpdater.autoDownload = false;
   autoUpdater.autoInstallOnAppQuit = false;
   autoUpdater.allowPrerelease = false;
-  configureAutoUpdater('github');
+  configureAutoUpdater('cloudflare');
 
   autoUpdater.on('download-progress', (progress) => {
     const percent = Number(progress?.percent || 0);

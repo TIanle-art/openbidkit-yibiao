@@ -1,6 +1,5 @@
 import * as Dialog from '@radix-ui/react-dialog';
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { trackPageView } from '../../../shared/analytics/analytics';
 import { AppDialog, AppSwitch, FloatingToolbar, ProgressBar, ToolbarArrowLeftIcon, ToolbarArrowRightIcon, ToolbarDocumentIcon, ToolbarSparkleIcon, useToast } from '../../../shared/ui';
 import type { FloatingToolbarGroup } from '../../../shared/ui';
 import type { OutlineItem } from '../../../shared/types';
@@ -111,7 +110,6 @@ function FeasibilityReportHome({ registerLeaveGuard, onSectionChange }: Feasibil
   }, [exportTemplateSearch, exportTemplates]);
 
   useEffect(() => {
-    trackPageView(`feasibility-report/${state.step}`);
     void window.yibiao?.ui?.setCurrentView({ section: 'feasibility-report', step: state.step });
   }, [state.step]);
 

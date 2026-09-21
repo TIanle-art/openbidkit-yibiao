@@ -1,11 +1,5 @@
 import type { AppMenuItem, SectionId } from '../shared/types/navigation';
 
-const githubStarNotice = {
-  message: '正在开发中，在github给作者点个star，可以加速开发。',
-  actionLabel: '点此直达',
-  externalUrl: 'https://github.com/FB208/OpenBidKit_Yibiao',
-};
-
 export const appMenuItems: AppMenuItem[] = [
   {
     id: 'bid-generation',
@@ -25,6 +19,12 @@ export const appMenuItems: AppMenuItem[] = [
         icon: 'expand',
       },
       {
+        id: 'past-bid-template',
+        label: '导入标书生成模版',
+        description: '导入以往标书（.docx / .pdf），自动读取纸张、边距、标题与正文样式，一键生成可复用的 Word 导出排版模版',
+        icon: 'document',
+      },
+      {
         id: 'feasibility-report',
         label: '可行性研究报告',
         description: '根据项目资料编制可行性研究报告',
@@ -36,7 +36,6 @@ export const appMenuItems: AppMenuItem[] = [
         label: '商务标',
         description: '整理商务响应、报价口径和合同偏离材料。',
         icon: 'briefcase',
-        notice: githubStarNotice,
       },
     ],
   },
@@ -73,9 +72,8 @@ export const appMenuItems: AppMenuItem[] = [
       {
         id: 'image-knowledge-base',
         label: '图片知识库',
-        description: '管理图片素材、图示和视觉参考资料',
+        description: '管理图示素材，支持上传、从文档知识库导入，供生成标书时复用',
         icon: 'file',
-        notice: githubStarNotice,
       },
     ],
   },
@@ -101,7 +99,6 @@ export const appMenuItems: AppMenuItem[] = [
         label: 'AI评标',
         description: '模拟AI评标，对标书进行打分，出具评标报告',
         icon: 'tool',
-        notice: githubStarNotice,
       },
     ],
   },
@@ -109,7 +106,6 @@ export const appMenuItems: AppMenuItem[] = [
     id: 'bid-opportunity',
     label: '投标机会',
     description: '机会发现与线索跟踪',
-    notice: githubStarNotice,
   },
   {
     id: 'plugin-manager',

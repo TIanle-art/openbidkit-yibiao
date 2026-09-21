@@ -1,9 +1,10 @@
 const fs = require('node:fs');
 const path = require('node:path');
+const crypto = require('node:crypto');
 const Database = require('better-sqlite3');
 const { getWorkspaceDatabasePath } = require('../utils/paths.cjs');
 
-const schemaVersion = 23;
+const schemaVersion = 32;
 
 function createInitialSchema(db) {
   db.exec(`
@@ -157,6 +158,37 @@ function createTechnicalPlanGlobalFactsSchema(db) {
 
     CREATE INDEX IF NOT EXISTS idx_technical_plan_global_fact_groups_order
     ON technical_plan_global_fact_groups(sort_order);
+  `);
+}
+
+function createTechnicalPlanBidPlanningSchema(db) {
+  addColumnIfMissing(db, 'technical_plan_outline_nodes', 'technical_topic_ids_json', 'TEXT');
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS technical_plan_bid_plan (
+      id INTEGER PRIMARY KEY CHECK (id = 1),
+      schema_version INTEGER NOT NULL DEFAULT 1,
+      plan_json TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS technical_plan_response_tables (
+      table_type TEXT PRIMARY KEY,
+      table_json TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS technical_plan_parameter_registry (
+      id INTEGER PRIMARY KEY CHECK (id = 1),
+      registry_json TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS technical_plan_quality_check (
+      id INTEGER PRIMARY KEY CHECK (id = 1),
+      result_json TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
   `);
 }
 
@@ -983,6 +1015,216 @@ function createExportTemplatesSchema(db) {
   `);
 }
 
+function addImageLibraryNameAndHash(db) {
+  addColumnIfMissing(db, 'image_library_images', 'content_hash', 'TEXT');
+  addColumnIfMissing(db, 'image_library_images', 'name', 'TEXT');
+}
+
+function addImageLibraryImageMeta(db) {
+  addColumnIfMissing(db, 'image_library_images', 'description', 'TEXT');
+  addColumnIfMissing(db, 'image_library_images', 'tags', 'TEXT');
+}
+
+function addImageLibrarySemanticMeta(db) {
+  addColumnIfMissing(db, 'image_library_images', 'original_name', 'TEXT');
+  addColumnIfMissing(db, 'image_library_images', 'metadata_status', "TEXT NOT NULL DEFAULT 'pending'");
+  addColumnIfMissing(db, 'image_library_images', 'metadata_error', 'TEXT');
+  addColumnIfMissing(db, 'image_library_images', 'metadata_updated_at', 'TEXT');
+  db.exec(`
+    UPDATE image_library_images
+    SET original_name = COALESCE(original_name, name),
+        metadata_status = CASE
+          WHEN COALESCE(description, '') <> '' OR COALESCE(tags, '') <> '' THEN 'ready'
+          ELSE 'pending'
+        END
+  `);
+}
+
+// 图片章节锚点：把每张图归属的目录章节与文档内顺序持久化，
+// 供「原件回填」按章节匹配后全量插入正文。
+function addImageSectionAnchorColumns(db) {
+  addColumnIfMissing(db, 'knowledge_document_images', 'position_index', 'INTEGER NOT NULL DEFAULT 0');
+  addColumnIfMissing(db, 'knowledge_document_images', 'section_level1', 'TEXT');
+  addColumnIfMissing(db, 'knowledge_document_images', 'section_level2', 'TEXT');
+  addColumnIfMissing(db, 'knowledge_document_images', 'section_path_json', 'TEXT');
+  addColumnIfMissing(db, 'knowledge_document_images', 'context_text', 'TEXT');
+  addColumnIfMissing(db, 'image_library_images', 'source_section_path_json', 'TEXT');
+  addColumnIfMissing(db, 'image_library_images', 'source_position_index', 'INTEGER NOT NULL DEFAULT 0');
+  addColumnIfMissing(db, 'image_library_images', 'source_context_text', 'TEXT');
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_knowledge_document_images_doc_position
+    ON knowledge_document_images(document_id, position_index);
+
+    CREATE INDEX IF NOT EXISTS idx_image_library_images_source_doc
+    ON image_library_images(source_document_id, source_position_index);
+  `);
+}
+
+function createSchemaMigrationsTable(db) {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS schema_migrations (
+      version INTEGER PRIMARY KEY,
+      description TEXT NOT NULL,
+      status TEXT NOT NULL,
+      started_at TEXT NOT NULL,
+      completed_at TEXT,
+      error TEXT
+    );
+  `);
+}
+
+function createDatabaseOptimizationTables(db) {
+  addColumnIfMissing(db, 'knowledge_documents', 'revision', 'INTEGER NOT NULL DEFAULT 1');
+  addColumnIfMissing(db, 'knowledge_items', 'content_hash', 'TEXT');
+  addColumnIfMissing(db, 'technical_plan_illustration_items', 'asset_id', 'TEXT REFERENCES image_library_images(image_id) ON DELETE RESTRICT');
+  createSchemaMigrationsTable(db);
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS feasibility_report_reference_docs (
+      report_id INTEGER NOT NULL DEFAULT 1 CHECK (report_id = 1),
+      document_id TEXT NOT NULL,
+      document_revision INTEGER NOT NULL DEFAULT 1,
+      markdown_hash TEXT,
+      sort_order INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL,
+      PRIMARY KEY (report_id, document_id),
+      FOREIGN KEY (document_id) REFERENCES knowledge_documents(document_id) ON DELETE CASCADE
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_feasibility_reference_docs_order
+    ON feasibility_report_reference_docs(report_id, sort_order);
+
+    CREATE INDEX IF NOT EXISTS idx_knowledge_documents_markdown_hash
+    ON knowledge_documents(markdown_hash);
+
+    CREATE INDEX IF NOT EXISTS idx_knowledge_items_content_hash
+    ON knowledge_items(document_id, content_hash);
+
+    CREATE INDEX IF NOT EXISTS idx_image_library_content_hash
+    ON image_library_images(content_hash);
+
+    CREATE INDEX IF NOT EXISTS idx_image_library_folder_status
+    ON image_library_images(folder_id, metadata_status, created_at DESC);
+
+    CREATE INDEX IF NOT EXISTS idx_image_library_source_document
+    ON image_library_images(source_document_id);
+
+    CREATE INDEX IF NOT EXISTS idx_technical_plan_illustration_asset
+    ON technical_plan_illustration_items(asset_id);
+  `);
+}
+
+function applyDatabaseOptimizationV30(db) {
+  createDatabaseOptimizationTables(db);
+
+  db.exec(`
+    CREATE TABLE technical_plan_reference_docs_v30 (
+      document_id TEXT PRIMARY KEY,
+      document_revision INTEGER NOT NULL DEFAULT 1,
+      markdown_hash TEXT,
+      sort_order INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL,
+      FOREIGN KEY (document_id) REFERENCES knowledge_documents(document_id) ON DELETE CASCADE
+    );
+
+    INSERT INTO technical_plan_reference_docs_v30 (
+      document_id, document_revision, markdown_hash, sort_order, created_at
+    )
+    SELECT r.document_id, COALESCE(d.revision, 1), d.markdown_hash, r.sort_order, COALESCE(d.updated_at, datetime('now'))
+    FROM technical_plan_reference_docs r
+    JOIN knowledge_documents d ON d.document_id = r.document_id;
+
+    DROP TABLE technical_plan_reference_docs;
+    ALTER TABLE technical_plan_reference_docs_v30 RENAME TO technical_plan_reference_docs;
+
+    CREATE INDEX idx_technical_plan_reference_docs_order
+    ON technical_plan_reference_docs(sort_order);
+
+    INSERT OR IGNORE INTO feasibility_report_reference_docs (
+      report_id, document_id, document_revision, markdown_hash, sort_order, created_at
+    )
+    SELECT 1, value, COALESCE(d.revision, 1), d.markdown_hash, CAST(key AS INTEGER), COALESCE(d.updated_at, datetime('now'))
+    FROM feasibility_report_meta m, json_each(CASE WHEN json_valid(m.reference_document_ids_json) THEN m.reference_document_ids_json ELSE '[]' END)
+    JOIN knowledge_documents d ON d.document_id = value
+    WHERE m.id = 1;
+  `);
+
+  const updateHash = db.prepare('UPDATE knowledge_items SET content_hash = ? WHERE id = ?');
+  for (const row of db.prepare("SELECT id, title, resume, content FROM knowledge_items WHERE content_hash IS NULL OR content_hash = ''").all()) {
+    const hash = crypto.createHash('sha256').update(`${row.title || ''}\n${row.resume || ''}\n${row.content || ''}`, 'utf8').digest('hex');
+    updateHash.run(hash, row.id);
+  }
+}
+
+function createImageLibrarySchema(db) {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS image_library_folders (
+      folder_id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      sort_order INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_image_library_folders_order
+    ON image_library_folders(sort_order, created_at);
+
+    CREATE TABLE IF NOT EXISTS image_library_images (
+      image_id TEXT PRIMARY KEY,
+      folder_id TEXT NOT NULL,
+      file_name TEXT NOT NULL,
+      asset_url TEXT NOT NULL,
+      mime TEXT,
+      ext TEXT,
+      byte_size INTEGER NOT NULL DEFAULT 0,
+      width INTEGER,
+      height INTEGER,
+      source_document_id TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      FOREIGN KEY (folder_id) REFERENCES image_library_folders(folder_id) ON DELETE CASCADE
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_image_library_images_folder
+    ON image_library_images(folder_id, created_at DESC);
+  `);
+}
+
+function createKnowledgeDocumentImagesSchema(db) {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS knowledge_document_images (
+      image_id TEXT PRIMARY KEY,
+      document_id TEXT NOT NULL,
+      batch_id TEXT NOT NULL,
+      asset_url TEXT NOT NULL,
+      file_name TEXT NOT NULL,
+      mime TEXT,
+      ext TEXT,
+      byte_size INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL,
+      FOREIGN KEY (document_id) REFERENCES knowledge_documents(document_id) ON DELETE CASCADE
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_knowledge_document_images_document
+    ON knowledge_document_images(document_id);
+  `);
+}
+
+function createPastBidTemplateSchema(db) {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS past_bid_template (
+      template_id TEXT PRIMARY KEY,
+      template_name TEXT NOT NULL,
+      source_file_names_json TEXT NOT NULL DEFAULT '[]',
+      skeleton_json TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_past_bid_template_updated
+    ON past_bid_template(updated_at DESC);
+  `);
+}
+
 function createFeasibilityReportSchema(db) {
   db.exec(`
     CREATE TABLE IF NOT EXISTS feasibility_report_meta (
@@ -1119,6 +1361,31 @@ const schemaHealthTableGroups = [
     tables: ['feasibility_report_meta', 'feasibility_report_tasks', 'feasibility_report_outline_nodes'],
     repair: createFeasibilityReportSchema,
   },
+  {
+    version: 25,
+    tables: ['knowledge_document_images'],
+    repair: createKnowledgeDocumentImagesSchema,
+  },
+  {
+    version: 26,
+    tables: ['image_library_folders', 'image_library_images'],
+    repair: createImageLibrarySchema,
+  },
+  {
+    version: 30,
+    tables: ['feasibility_report_reference_docs', 'schema_migrations'],
+    repair: createDatabaseOptimizationTables,
+  },
+  {
+    version: 31,
+    tables: [
+      'technical_plan_bid_plan',
+      'technical_plan_response_tables',
+      'technical_plan_parameter_registry',
+      'technical_plan_quality_check',
+    ],
+    repair: createTechnicalPlanBidPlanningSchema,
+  },
 ];
 
 function removeKnowledgeMigrationMeta(db) {
@@ -1126,6 +1393,64 @@ function removeKnowledgeMigrationMeta(db) {
 }
 
 const schemaHealthColumnGroups = [
+  {
+    version: 30,
+    table: 'knowledge_documents',
+    columns: { revision: 'INTEGER NOT NULL DEFAULT 1' },
+  },
+  {
+    version: 30,
+    table: 'knowledge_items',
+    columns: { content_hash: 'TEXT' },
+  },
+  {
+    version: 30,
+    table: 'technical_plan_reference_docs',
+    columns: {
+      document_revision: 'INTEGER NOT NULL DEFAULT 1',
+      markdown_hash: 'TEXT',
+      created_at: 'TEXT',
+    },
+  },
+  {
+    version: 30,
+    table: 'technical_plan_illustration_items',
+    columns: { asset_id: 'TEXT REFERENCES image_library_images(image_id) ON DELETE RESTRICT' },
+  },
+  {
+    version: 29,
+    table: 'image_library_images',
+    columns: {
+      content_hash: 'TEXT',
+      name: 'TEXT',
+      original_name: 'TEXT',
+      description: 'TEXT',
+      tags: 'TEXT',
+      metadata_status: "TEXT NOT NULL DEFAULT 'pending'",
+      metadata_error: 'TEXT',
+      metadata_updated_at: 'TEXT',
+    },
+  },
+  {
+    version: 32,
+    table: 'knowledge_document_images',
+    columns: {
+      position_index: 'INTEGER NOT NULL DEFAULT 0',
+      section_level1: 'TEXT',
+      section_level2: 'TEXT',
+      section_path_json: 'TEXT',
+      context_text: 'TEXT',
+    },
+  },
+  {
+    version: 32,
+    table: 'image_library_images',
+    columns: {
+      source_section_path_json: 'TEXT',
+      source_position_index: 'INTEGER NOT NULL DEFAULT 0',
+      source_context_text: 'TEXT',
+    },
+  },
   {
     version: 1,
     table: 'technical_plan_meta',
@@ -1281,6 +1606,13 @@ const schemaHealthColumnGroups = [
       content_mode_note: 'TEXT',
     },
   },
+  {
+    version: 31,
+    table: 'technical_plan_outline_nodes',
+    columns: {
+      technical_topic_ids_json: 'TEXT',
+    },
+  },
 ];
 
 function quoteIdentifier(value) {
@@ -1341,6 +1673,10 @@ function ensureWorkspaceSchemaHealth(db, targetVersion = schemaVersion, onStatus
   }
   if (targetVersion >= 17 && existingTables.has('technical_plan_content_plans')) {
     removeLegacyTechnicalPlanIllustrationType(db);
+  }
+  if (targetVersion >= 30) {
+    // IF NOT EXISTS 索引不会被字段健康检查覆盖，因此统一在 v30 做幂等修复。
+    createDatabaseOptimizationTables(db);
   }
 }
 
@@ -1460,6 +1796,51 @@ const migrations = [
     description: '新增可行性研究报告工作区表结构',
     up: createFeasibilityReportSchema,
   },
+  {
+    version: 24,
+    description: '新增历史标书模板库表结构',
+    up: createPastBidTemplateSchema,
+  },
+  {
+    version: 25,
+    description: '新增知识库文档图片索引表',
+    up: createKnowledgeDocumentImagesSchema,
+  },
+  {
+    version: 26,
+    description: '新增图片知识库（图示素材库）表结构',
+    up: createImageLibrarySchema,
+  },
+  {
+    version: 27,
+    description: '图片知识库新增内容哈希与用户命名列',
+    up: addImageLibraryNameAndHash,
+  },
+  {
+    version: 28,
+    description: '图片知识库素材新增内容描述与标签列',
+    up: addImageLibraryImageMeta,
+  },
+  {
+    version: 29,
+    description: '图片知识库新增语义标注状态与原始名称',
+    up: addImageLibrarySemanticMeta,
+  },
+  {
+    version: 30,
+    description: '引用快照、素材外键、迁移审计与查询索引优化',
+    up: applyDatabaseOptimizationV30,
+  },
+  {
+    version: 31,
+    description: '新增 Bid Planning、响应表、参数注册表和质量检查结构',
+    up: createTechnicalPlanBidPlanningSchema,
+  },
+  {
+    version: 32,
+    description: '图片索引新增章节锚点，支持按目录章节回填原件',
+    up: addImageSectionAnchorColumns,
+  },
 ];
 
 function timestampForFileName() {
@@ -1488,24 +1869,40 @@ function backupDatabaseFiles(db, databasePath, onStatus) {
   copyIfExists(`${databasePath}-shm`, `${databasePath}-shm.${suffix}`);
 }
 
-// 数据库升级成功后，统一删除当前数据库积累的全部历史备份。
-function clearDatabaseBackupFiles(databasePath) {
+// 保留最近三次迁移备份，既限制空间又保留可回退点。
+function pruneDatabaseBackupFiles(databasePath, keepCount = 3) {
   const directory = path.dirname(databasePath);
   const databaseName = path.basename(databasePath);
-  const backupPrefixes = [
-    `${databaseName}.backup-`,
-    `${databaseName}-wal.backup-`,
-    `${databaseName}-shm.backup-`,
-  ];
-
-  for (const fileName of fs.readdirSync(directory)) {
-    if (!backupPrefixes.some((prefix) => fileName.startsWith(prefix))) continue;
-    try {
-      fs.unlinkSync(path.join(directory, fileName));
-    } catch (error) {
-      console.warn(`[sqlite] 删除数据库备份失败：${fileName}`, error?.message || String(error));
+  const mainPrefix = `${databaseName}.backup-`;
+  const backups = fs.readdirSync(directory)
+    .filter((fileName) => fileName.startsWith(mainPrefix))
+    .map((fileName) => ({ fileName, suffix: fileName.slice(databaseName.length) }))
+    .sort((a, b) => b.fileName.localeCompare(a.fileName));
+  const staleSuffixes = backups.slice(Math.max(0, keepCount)).map((entry) => entry.suffix);
+  for (const suffix of staleSuffixes) {
+    for (const fileName of [`${databaseName}${suffix}`, `${databaseName}-wal${suffix}`, `${databaseName}-shm${suffix}`]) {
+      try {
+        if (fs.existsSync(path.join(directory, fileName))) fs.unlinkSync(path.join(directory, fileName));
+      } catch (error) {
+        console.warn(`[sqlite] 删除过期数据库备份失败：${fileName}`, error?.message || String(error));
+      }
     }
   }
+}
+
+function recordMigrationResult(db, migration, status, startedAt, error) {
+  if (!getExistingTables(db).has('schema_migrations')) return;
+  const completedAt = new Date().toISOString();
+  db.prepare(`
+    INSERT INTO schema_migrations (version, description, status, started_at, completed_at, error)
+    VALUES (?, ?, ?, ?, ?, ?)
+    ON CONFLICT(version) DO UPDATE SET
+      description = excluded.description,
+      status = excluded.status,
+      started_at = excluded.started_at,
+      completed_at = excluded.completed_at,
+      error = excluded.error
+  `).run(migration.version, migration.description, status, startedAt, completedAt, error ? String(error) : null);
 }
 
 function applyMigrations(db, databasePath, onStatus) {
@@ -1521,6 +1918,8 @@ function applyMigrations(db, databasePath, onStatus) {
   if (currentVersion > 0) {
     backupDatabaseFiles(db, databasePath, onStatus);
   }
+  // 先创建迁移审计表，即使后续迁移回滚，失败原因仍可留存。
+  createSchemaMigrationsTable(db);
 
   const runMigration = db.transaction((migration) => {
     migration.up(db);
@@ -1528,6 +1927,7 @@ function applyMigrations(db, databasePath, onStatus) {
   });
 
   for (const migration of migrations.filter((item) => item.version > currentVersion).sort((a, b) => a.version - b.version)) {
+    const startedAt = new Date().toISOString();
     try {
       ensureWorkspaceSchemaHealth(db, migration.version - 1, onStatus);
       emitDatabaseStatus(onStatus, {
@@ -1539,14 +1939,21 @@ function applyMigrations(db, databasePath, onStatus) {
         migrationDescription: migration.description,
       });
       runMigration(migration);
+      recordMigrationResult(db, migration, 'success', startedAt, null);
       ensureWorkspaceSchemaHealth(db, migration.version, onStatus);
     } catch (error) {
+      recordMigrationResult(db, migration, 'error', startedAt, error?.message || String(error));
       throw new Error(`数据库升级失败（v${migration.version} ${migration.description}）：${error.message || String(error)}`);
     }
   }
 
   ensureWorkspaceSchemaHealth(db, schemaVersion, onStatus);
-  clearDatabaseBackupFiles(databasePath);
+  const quickCheck = db.pragma('quick_check', { simple: true });
+  if (quickCheck !== 'ok') {
+    throw new Error(`数据库完整性检查失败：${quickCheck || '未知错误'}`);
+  }
+  db.pragma('optimize');
+  pruneDatabaseBackupFiles(databasePath);
 }
 
 function createSqliteDatabase(app, options = {}) {
@@ -1566,6 +1973,12 @@ function createSqliteDatabase(app, options = {}) {
 
   const close = () => {
     if (db.open) {
+      try {
+        db.pragma('optimize');
+        db.pragma('wal_checkpoint(PASSIVE)');
+      } catch {
+        // 关闭阶段维护失败不应阻止应用退出。
+      }
       db.close();
     }
   };

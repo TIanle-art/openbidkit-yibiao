@@ -5,6 +5,7 @@ export interface KnowledgeItem {
   content: string;
   source_block_ids?: string[];
   source_file?: string;
+  content_hash?: string;
 }
 
 export interface KnowledgeCandidateItem {
@@ -95,6 +96,7 @@ export interface KnowledgeDocument {
   discarded_block_count?: number;
   system_discarded_after_retry_count?: number;
   last_batch_size?: number;
+  revision?: number;
   sort_order?: number;
   created_at: string;
   updated_at: string;

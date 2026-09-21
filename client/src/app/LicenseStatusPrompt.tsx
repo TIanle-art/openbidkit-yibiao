@@ -3,7 +3,7 @@ import { useEffect, useState } from 'react';
 import { OfflineLicenseActivationDialog } from '../shared/ui';
 import type { LicenseRuntimeStatus } from '../shared/types';
 
-const officialDownloadUrl = 'https://github.com/FB208/OpenBidKit_Yibiao';
+const officialDownloadUrl = 'https://yibiao.pro';
 
 function getLicenseProblem(status: LicenseRuntimeStatus | null) {
   if (!status) return '';

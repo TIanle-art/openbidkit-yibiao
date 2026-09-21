@@ -20,7 +20,7 @@
 | D1 `openbidkit-resources` | `RESOURCE_DB` | 资源管理元数据 |
 | R2 `openbidkit` | `RESOURCE_BUCKET` | 资源图片、插件当前版与上一版安装包 |
 | R2 `openbidkit-agent-errors` | `AGENT_ERROR_BUCKET` | gzip Agent 完整失败诊断包，保留 7 天 |
-| KV | `NOTICE_STORE` | 公告、授权配置、GitHub stats 缓存和模型信息精简索引 |
+| KV | `NOTICE_STORE` | 公告、授权配置和模型信息精简索引 |
 
 `openbidkit-analytics` 可以在改版时直接删除并由 `setup:analytics-storage` 重建；删除后异常日志元数据会丢失，R2 孤立对象仍由 7 天生命周期自动清理。不要删除 `openbidkit-resources`。
 
@@ -45,7 +45,6 @@
 | `GET /api/agent-errors/download` | D1 + R2 | `ADMIN_TOKEN` | 下载单份 `.json.gz` 完整诊断包 |
 | `GET /api/latest` | AE | `ADMIN_TOKEN` | 最近事件，支持 `event` 筛选 |
 | `GET /api/retention` | D1 | `ADMIN_TOKEN` | 留存概览，读取 Cron 生成的最新 30 天快照 |
-| `GET /api/github-repo-stats` | GitHub + KV | `ADMIN_TOKEN` | GitHub stats |
 | `GET /notice` | KV | 无 | 客户端公告 |
 | `GET /model-info` | KV | 无 | 按 `modelName` 返回最终生效的思考强度、最大 context/output 和缓存时间，人工覆盖优先 |
 | `GET/POST/DELETE /api/notice` | KV | `ADMIN_TOKEN` | 公告后台管理 |
@@ -126,7 +125,6 @@ Worker 运行时还需要在 Cloudflare 后台配置 Secret：
 | `ADMIN_TOKEN` | Dashboard 管理 Token |
 | `ANALYTICS_API_TOKEN` | Analytics Engine SQL Read Token |
 | `OPENBIDKIT_PET_READ_TOKEN` | 插件同步专用 GitHub Fine-grained Token，仅授予 `openbidkit-pet` 仓库 `Contents: Read-only` 权限 |
-| `OPENBIDKIT_YIBIAO_METADATA_READ_TOKEN` | 可选，仓库统计专用 GitHub Fine-grained Token，仅选择 `OpenBidKit_Yibiao` 仓库并保留自动授予的 `Metadata: Read-only` 权限 |
 | `LICENSE_PRIVATE_KEY_JWK` | ECDSA P-256 私钥 JWK，用于签发客户端 license |
 | `LICENSE_KEY_ID` | 可选，授权签名 key id，默认 `official-build-key-2026-01` |
 

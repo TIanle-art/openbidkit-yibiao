@@ -4,7 +4,7 @@
 -- 1. 本文件用于开源开发者阅读、评审和排查问题，展示 workspace/yibiao.sqlite 的目标完整表结构。
 -- 2. 用户运行客户端时不需要手动执行本文件。
 -- 3. 客户端运行时建表和升级以 Electron Main 侧 migration 代码为准。
--- 4. 当前运行代码已落地 technical_plan_* v1、duplicate_check_* / rejection_check_* v2、knowledge_* v3、technical_plan_global_fact_groups v4、标段兼容 v5/v6、标段选择 v7、旧待选择标段兼容字段 v8、工作流类型和原方案文件状态 v9、招标解析项选择配置 v10、知识库排序 v11、废标项检查多投标文件 v12、已有方案目录配置 v13、多标段优化状态 v14、导出模板库 v15、多招标文件 v16、全文图片编排 v17、目录字数控制 v18、全局事实补全模式 v22、可行性研究报告 v23 目标结构。
+-- 4. 当前运行代码已落地 technical_plan_* v1、duplicate_check_* / rejection_check_* v2、knowledge_* v3、technical_plan_global_fact_groups v4、标段兼容 v5/v6、标段选择 v7、旧待选择标段兼容字段 v8、工作流类型和原方案文件状态 v9、招标解析项选择配置 v10、知识库排序 v11、废标项检查多投标文件 v12、已有方案目录配置 v13、多标段优化状态 v14、导出模板库 v15、多招标文件 v16、全文图片编排 v17、目录字数控制 v18、全局事实补全模式 v22、可行性研究报告 v23、历史标书模板库 v24、知识库文档图片索引 v25、图片知识库 v26、图片库内容哈希与命名 v27、素材描述与标签 v28、语义标注状态 v29、引用快照与索引优化 v30、Bid Planning 与证据驱动生成 v31 目标结构。
 -- 5. 每次表结构调整后，需要同步更新本文件和 runtime migration 版本。
 -- 6. 本文件不保存历史版本，每次更新都写入最新目标完整结构。
 
@@ -14,7 +14,16 @@ PRAGMA busy_timeout = 5000;
 
 -- 目标完整结构版本。
 -- 运行时代码应通过 PRAGMA user_version 判断是否需要自动升级。
-PRAGMA user_version = 23;
+PRAGMA user_version = 31;
+
+CREATE TABLE IF NOT EXISTS schema_migrations (
+  version INTEGER PRIMARY KEY,
+  description TEXT NOT NULL,
+  status TEXT NOT NULL,
+  started_at TEXT NOT NULL,
+  completed_at TEXT,
+  error TEXT
+);
 
 -- ============================================================================
 -- 技术方案 technical_plan_*（v1 已落地）
@@ -129,6 +138,7 @@ CREATE TABLE IF NOT EXISTS technical_plan_illustration_items (
   section_ids_json TEXT NOT NULL,
   placement TEXT NOT NULL,
   priority INTEGER NOT NULL DEFAULT 0,
+  asset_id TEXT,
   generation_status TEXT,
   generation_mode TEXT,
   generation_code TEXT,
@@ -138,11 +148,15 @@ CREATE TABLE IF NOT EXISTS technical_plan_illustration_items (
   generation_error TEXT,
   generation_updated_at TEXT,
   sort_order INTEGER NOT NULL DEFAULT 0,
-  updated_at TEXT NOT NULL
+  updated_at TEXT NOT NULL,
+  FOREIGN KEY (asset_id) REFERENCES image_library_images(image_id) ON DELETE RESTRICT
 );
 
 CREATE INDEX IF NOT EXISTS idx_technical_plan_illustration_items_order
 ON technical_plan_illustration_items(sort_order);
+
+CREATE INDEX IF NOT EXISTS idx_technical_plan_illustration_asset
+ON technical_plan_illustration_items(asset_id);
 
 -- 技术方案招标文件解析项。
 CREATE TABLE IF NOT EXISTS technical_plan_bid_items (
@@ -161,7 +175,11 @@ ON technical_plan_bid_items(sort_order);
 -- 技术方案选中的参考知识库文档。
 CREATE TABLE IF NOT EXISTS technical_plan_reference_docs (
   document_id TEXT PRIMARY KEY,
-  sort_order INTEGER NOT NULL DEFAULT 0
+  document_revision INTEGER NOT NULL DEFAULT 1,
+  markdown_hash TEXT,
+  sort_order INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL,
+  FOREIGN KEY (document_id) REFERENCES knowledge_documents(document_id) ON DELETE CASCADE
 );
 
 CREATE INDEX IF NOT EXISTS idx_technical_plan_reference_docs_order
@@ -180,6 +198,8 @@ CREATE TABLE IF NOT EXISTS technical_plan_outline_nodes (
   content_mode_note TEXT,
   source_requirement_id TEXT,
   source_requirement_title TEXT,
+  -- v31 目录节点覆盖的 Bid Plan technical topic id 列表。
+  technical_topic_ids_json TEXT,
   knowledge_item_ids_json TEXT,
   content TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL,
@@ -228,6 +248,33 @@ CREATE TABLE IF NOT EXISTS technical_plan_global_fact_groups (
 
 CREATE INDEX IF NOT EXISTS idx_technical_plan_global_fact_groups_order
 ON technical_plan_global_fact_groups(sort_order);
+
+-- v31 标书规划中间层。招标解析完成后一次性生成，作为目录、响应表和章节编排的权威输入。
+CREATE TABLE IF NOT EXISTS technical_plan_bid_plan (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  schema_version INTEGER NOT NULL DEFAULT 1,
+  plan_json TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS technical_plan_response_tables (
+  table_type TEXT PRIMARY KEY,
+  table_json TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS technical_plan_parameter_registry (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  registry_json TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS technical_plan_quality_check (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  result_json TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
 
 -- ============================================================================
 -- 标书查重 duplicate_check_*（v2 目标设计）
@@ -668,6 +715,7 @@ CREATE TABLE IF NOT EXISTS knowledge_documents (
   system_discarded_after_retry_count INTEGER NOT NULL DEFAULT 0,
   last_batch_size INTEGER,
   parser_label TEXT,
+  revision INTEGER NOT NULL DEFAULT 1,
   sort_order INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
@@ -679,6 +727,9 @@ ON knowledge_documents(folder_id, sort_order, created_at DESC);
 
 CREATE INDEX IF NOT EXISTS idx_knowledge_documents_status
 ON knowledge_documents(status);
+
+CREATE INDEX IF NOT EXISTS idx_knowledge_documents_markdown_hash
+ON knowledge_documents(markdown_hash);
 
 -- 知识库有效 block 和筛除 block。
 -- is_filtered = 0 表示进入 AI 分析的有效 block；is_filtered = 1 表示程序筛除的 block。
@@ -733,6 +784,7 @@ CREATE TABLE IF NOT EXISTS knowledge_items (
   content TEXT NOT NULL,
   source_file TEXT,
   content_chars INTEGER NOT NULL DEFAULT 0,
+  content_hash TEXT,
   sort_order INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
@@ -745,6 +797,9 @@ ON knowledge_items(document_id, sort_order);
 
 CREATE INDEX IF NOT EXISTS idx_knowledge_items_title
 ON knowledge_items(title);
+
+CREATE INDEX IF NOT EXISTS idx_knowledge_items_content_hash
+ON knowledge_items(document_id, content_hash);
 
 -- 最终条目引用的来源 block。
 CREATE TABLE IF NOT EXISTS knowledge_item_blocks (
@@ -833,6 +888,82 @@ CREATE INDEX IF NOT EXISTS idx_knowledge_match_batches_status
 ON knowledge_match_batches(document_id, status, batch_index);
 
 -- ============================================================================
+-- 知识库文档图片索引 knowledge_document_images（v25 目标设计）
+-- ============================================================================
+
+-- 知识库导入时从 .docx/.pdf 提取的图片，本体存 imported-images/ 文件，本表存元数据（asset_url 等），
+-- 便于按文档检索；删除文档时随 knowledge_documents 级联清理记录，文件由导入侧按 scope 清理。
+CREATE TABLE IF NOT EXISTS knowledge_document_images (
+  image_id TEXT PRIMARY KEY,
+  document_id TEXT NOT NULL,
+  batch_id TEXT NOT NULL,
+  asset_url TEXT NOT NULL,
+  file_name TEXT NOT NULL,
+  mime TEXT,
+  ext TEXT,
+  byte_size INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL,
+  FOREIGN KEY (document_id) REFERENCES knowledge_documents(document_id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_knowledge_document_images_document
+ON knowledge_document_images(document_id);
+
+-- ============================================================================
+-- 图片知识库 image_library_*（v26 目标设计）
+-- ============================================================================
+
+-- 图片知识库（图示素材库）：用户直接上传、或从文档知识库导入的图片素材。
+-- 图片本体存 userData/workspace/image-library/_assets/<image_id>.<ext>，经
+-- yibiao-asset://image-library/... 访问；本表存元数据索引（不入二进制）。
+CREATE TABLE IF NOT EXISTS image_library_folders (
+  folder_id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  sort_order INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_image_library_folders_order
+ON image_library_folders(sort_order, created_at);
+
+CREATE TABLE IF NOT EXISTS image_library_images (
+  image_id TEXT PRIMARY KEY,
+  folder_id TEXT NOT NULL,
+  file_name TEXT NOT NULL,
+  asset_url TEXT NOT NULL,
+  mime TEXT,
+  ext TEXT,
+  byte_size INTEGER NOT NULL DEFAULT 0,
+  width INTEGER,
+  height INTEGER,
+  source_document_id TEXT,
+  content_hash TEXT,
+  name TEXT,
+  original_name TEXT,
+  description TEXT,
+  tags TEXT,
+  metadata_status TEXT NOT NULL DEFAULT 'pending',
+  metadata_error TEXT,
+  metadata_updated_at TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  FOREIGN KEY (folder_id) REFERENCES image_library_folders(folder_id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_image_library_images_folder
+ON image_library_images(folder_id, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_image_library_content_hash
+ON image_library_images(content_hash);
+
+CREATE INDEX IF NOT EXISTS idx_image_library_folder_status
+ON image_library_images(folder_id, metadata_status, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_image_library_source_document
+ON image_library_images(source_document_id);
+
+-- ============================================================================
 -- 导出模板 export_templates（v15 目标设计）
 -- ============================================================================
 
@@ -884,6 +1015,20 @@ CREATE TABLE IF NOT EXISTS feasibility_report_tasks (
   updated_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS feasibility_report_reference_docs (
+  report_id INTEGER NOT NULL DEFAULT 1 CHECK (report_id = 1),
+  document_id TEXT NOT NULL,
+  document_revision INTEGER NOT NULL DEFAULT 1,
+  markdown_hash TEXT,
+  sort_order INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (report_id, document_id),
+  FOREIGN KEY (document_id) REFERENCES knowledge_documents(document_id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_feasibility_reference_docs_order
+ON feasibility_report_reference_docs(report_id, sort_order);
+
 CREATE TABLE IF NOT EXISTS feasibility_report_outline_nodes (
   node_id TEXT PRIMARY KEY,
   parent_node_id TEXT,
@@ -903,3 +1048,22 @@ ON feasibility_report_outline_nodes(parent_node_id, sort_order);
 
 CREATE INDEX IF NOT EXISTS idx_feasibility_report_outline_level
 ON feasibility_report_outline_nodes(level);
+
+-- ============================================================================
+-- 历史标书模板库 past_bid_template（v24 已落地）
+-- ============================================================================
+
+-- 每个模板一行：从历史标书提取的可复用目录骨架，来源标书 Markdown 原文放文件系统
+-- （userData/workspace/past-bid-templates/<template_id>/sources/），不进 SQLite。
+-- source_file_names_json / skeleton_json 以 JSON 字符串存储。
+CREATE TABLE IF NOT EXISTS past_bid_template (
+  template_id TEXT PRIMARY KEY,
+  template_name TEXT NOT NULL,
+  source_file_names_json TEXT NOT NULL DEFAULT '[]',
+  skeleton_json TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_past_bid_template_updated
+ON past_bid_template(updated_at DESC);

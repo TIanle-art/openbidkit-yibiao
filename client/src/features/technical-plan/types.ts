@@ -17,6 +17,87 @@ export type SaveOutlineReason = 'sort' | 'edit' | 'delete' | 'add-root' | 'add-c
 export type OutlineAttribute = '通用' | '商务' | '资信' | '技术' | '其他';
 export type GlobalFactsMode = 'fabricate' | 'omit' | 'placeholder';
 
+export interface BidPlanSourceRef {
+  source_id?: string;
+  page?: string;
+  section?: string;
+  chunk_id?: string;
+  label?: string;
+}
+
+export interface BidPlanTechnicalTopic {
+  id: string;
+  title: string;
+  requirements: Array<{ text: string; source_refs: BidPlanSourceRef[] }>;
+  source_refs: BidPlanSourceRef[];
+  importance: 'critical' | 'high' | 'medium' | 'low';
+  recommended_section: string;
+  evidence_categories: string[];
+  keywords: string[];
+}
+
+export interface BidPlanState {
+  schema_version: number;
+  project_type: { primary: 'equipment_procurement' | 'goods_procurement' | 'engineering' | 'service' | 'software_it' | 'mixed'; secondary: string[] };
+  procurement_targets: Array<{ name: string; quantity: string; unit: string; category: string; source_refs: BidPlanSourceRef[] }>;
+  project_characteristics: string[];
+  technical_topics: BidPlanTechnicalTopic[];
+  parameter_candidates?: Array<{ key: string; label: string; tender_requirement: string; bid_value: string; status: 'UNKNOWN'; source_refs: BidPlanSourceRef[] }>;
+  service_topics: string[];
+  required_tables: Array<{ type: 'technical_parameter_response' | 'technical_deviation' | 'supply_scope'; required: boolean; template_preferred: boolean; template_title: string; columns: string[]; source_refs: BidPlanSourceRef[]; reason: string }>;
+  evaluation_topics: Array<{ topic: string; score: string; requirement: string; source_refs: BidPlanSourceRef[] }>;
+  proposal_parts: string[];
+  unknowns: string[];
+}
+
+export interface OutlineCoverageState {
+  covered_topics: Array<{ topic_id: string; title: string; status: 'covered'; node_ids: string[]; score: number }>;
+  partially_covered_topics: Array<{ topic_id: string; title: string; status: 'partial'; node_ids: string[]; score: number }>;
+  missing_topics: Array<{ topic_id: string; title: string; status: 'missing'; node_ids: string[]; score: number }>;
+  coverage_score: number;
+  covered_count: number;
+  total_count: number;
+  /** 缺少技术主题时为 false，coverage_score 固定为 0：那是提取失败，不是覆盖完美。 */
+  computable: boolean;
+}
+
+/** 招标文件自己规定的响应文件章节覆盖：合规骨架，与技术主题覆盖是两把尺子。 */
+export interface ResponseSectionCoverageState {
+  /** 未解析出章节清单时为 false，不应据此判合格或不合格。 */
+  computable: boolean;
+  reason?: string;
+  required_total: number;
+  optional_total: number;
+  covered_count: number;
+  coverage_score: number;
+  missing_required: Array<{ name: string; category: string; category_label: string }>;
+  thin_sections: Array<{
+    name: string;
+    category: string;
+    category_label: string;
+    node_id: string;
+    node_title: string;
+    content_mode: string;
+    content_chars: number;
+  }>;
+  by_category: Record<string, { label: string; total: number; covered: number; missing: string[] }>;
+}
+
+export interface BidQualityCheckState {
+  technical_coverage: OutlineCoverageState;
+  response_section_coverage?: ResponseSectionCoverageState;
+  parameter_conflicts: unknown[];
+  duplicate_sections: unknown[];
+  missing_tables: string[];
+  unsupported_claims: unknown[];
+}
+
+export interface ParameterRegistryState {
+  schema_version: number;
+  unknown_placeholder: string;
+  parameters: Array<{ key: string; label: string; tender_requirement: string; bid_value: string; status: 'CONFIRMED' | 'PARTIAL' | 'UNKNOWN'; source_type: string; source_refs: BidPlanSourceRef[]; confidence: number }>;
+}
+
 export interface SaveOutlineRequest {
   outlineData: OutlineData;
   reason: SaveOutlineReason;
@@ -108,6 +189,7 @@ export interface BackgroundTaskState {
       word_adjustment_attempts: number;
       word_adjustment_warning?: string;
       word_adjustment_warning_kind?: 'leaf-count' | 'quality';
+      technical_coverage?: OutlineCoverageState;
     };
     content?: {
       phase: ContentGenerationPhase;
@@ -208,7 +290,7 @@ export interface ContentGenerationSectionState {
 export type ContentGenerationSections = Record<string, ContentGenerationSectionState>;
 
 export type ContentMermaidDiagramType = 'process' | 'hierarchy' | 'responsibility';
-export type ContentIllustrationKind = 'ai' | 'mermaid' | 'html';
+export type ContentIllustrationKind = 'ai' | 'mermaid' | 'html' | 'asset';
 export type ContentIllustrationPlacement = 'before' | 'after';
 
 export interface ContentGenerationPlanData {
@@ -233,6 +315,8 @@ export interface ContentGenerationPlanData {
     restored_at?: string;
     optimized_at?: string;
   };
+  section_brief?: Record<string, unknown>;
+  evidence_pack?: Record<string, unknown>;
 }
 
 export interface ContentGenerationPlanState {
@@ -252,6 +336,8 @@ export interface ContentIllustrationPlanItem {
   section_ids: string[];
   placement: ContentIllustrationPlacement;
   priority: number;
+  asset_id?: string;
+  asset_url?: string;
   generation?: {
     status: 'pending' | 'running' | 'success' | 'error';
     mode?: 'normal' | 'agent';
@@ -363,6 +449,7 @@ export interface TechnicalPlanState {
   outlineWordControlOptions: OutlineWordControlOptions;
   outlineWordControlSnapshot?: OutlineWordControlOptions;
   referenceKnowledgeDocumentIds: string[];
+  referencePastBidTemplateId?: string;
   bidSectionExtractionTask?: BackgroundTaskState;
   bidAnalysisTask?: BackgroundTaskState;
   outlineGenerationTask?: BackgroundTaskState;
@@ -378,5 +465,9 @@ export interface TechnicalPlanState {
   contentIllustrationPlan?: ContentIllustrationPlanState;
   contentGenerationRuntime?: ContentGenerationRuntimeState;
   bidTemplateExists?: boolean;
+  bidPlan?: BidPlanState;
+  responseTables?: Partial<Record<'technical_parameter_response' | 'technical_deviation' | 'supply_scope', Record<string, unknown>>>;
+  parameterRegistry?: ParameterRegistryState;
+  qualityCheck?: BidQualityCheckState;
   outlineData: OutlineData | null;
 }

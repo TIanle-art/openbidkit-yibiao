@@ -4,7 +4,6 @@ const crypto = require('node:crypto');
 const { dialog } = require('electron');
 const { createPiRuntimeService } = require('./pi/piRuntimeService.cjs');
 const { buildPiSelfCheckReportMarkdown } = require('./pi/piSelfCheckService.cjs');
-const { createAgentErrorReporter } = require('./agent/agentErrorReporter.cjs');
 const { resolveAgentAbortReason } = require('./agent/agentInterruption.cjs');
 const {
   createPersistentAgentTask,
@@ -148,7 +147,6 @@ function normalizeSelfCheckResult(rawResult = {}) {
 
 // 协调共享 Pi 运行基础设施，并为每个 Agent 任务创建独立 Runtime/Session。
 function createAgentService({ app, configStore, aiService, licenseService, autoConfirmationService }) {
-  const agentErrorReporter = createAgentErrorReporter({ app, configStore, licenseService });
   const listeners = new Set();
   const monitorListeners = new Set();
   const questionListeners = new Set();
@@ -572,17 +570,7 @@ function createAgentService({ app, configStore, aiService, licenseService, autoC
       .catch((error) => {
         const normalizedError = normalizeRunError(error);
         const persistentTask = Boolean(taskKey);
-        const shouldReport = !runtimePayload.signal?.aborted
-          && !['AGENT_DISCONNECTED', 'TASK_CANCELLED'].includes(normalizedError?.code);
-        if (shouldReport) {
-          void agentErrorReporter.reportFailure({
-            payload: runtimePayload,
-            error: normalizedError,
-            userTaskContext: resolveUserTaskContext(userTaskContextProvider),
-          }).finally(() => {
-            if (!persistentTask) void entry.runtime?.deleteTaskArchive?.(taskId);
-          });
-        } else if (!persistentTask) {
+        if (!persistentTask) {
           void entry.runtime?.deleteTaskArchive?.(taskId);
         }
         throw normalizedError;
@@ -770,7 +758,6 @@ function createAgentService({ app, configStore, aiService, licenseService, autoC
     primarySessionListeners.clear();
     monitorListeners.clear();
     clearPendingMonitorEvents();
-    agentErrorReporter.close();
 
     const entries = [...activeEntries.values()];
     await Promise.all(entries.map((entry) => entry.runtime?.close?.().catch(() => undefined)));

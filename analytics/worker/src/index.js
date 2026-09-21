@@ -3,7 +3,6 @@ import { handleAgentRuntime } from './routes/agentRuntime.js';
 import { handleAdminAgentErrorConfig, handleAdminAgentErrorDownload, handleAdminAgentErrors, handleAgentErrorIngest } from './routes/agentErrors.js';
 import { handleClients, handleClientDetail, handleIpStats } from './routes/clients.js';
 import { handleConfigUsage, handleModelUsage } from './routes/configUsage.js';
-import { handleGitHubRepoStats } from './routes/githubRepoStats.js';
 import { handleHealth } from './routes/health.js';
 import { handleLatest } from './routes/latest.js';
 import { handleLicenseActivate, handleLicenseConfig, handleOfflineLicense } from './routes/license.js';
@@ -58,7 +57,6 @@ const routes = new Map([
   ['/api/agent-errors/config', handleAdminAgentErrorConfig],
   ['/api/agent-errors/download', handleAdminAgentErrorDownload],
   ['/api/agent-errors', handleAdminAgentErrors],
-  ['/api/github-repo-stats', handleGitHubRepoStats],
 ]);
 
 export default {

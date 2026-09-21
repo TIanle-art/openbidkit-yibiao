@@ -3,6 +3,11 @@ const {
   TEMPLATE_EXTRACTION_AGENT_TASK_KEY,
 } = require('./outlineGenerationAgentV2Config.cjs');
 const { runTemplateExtractionTask } = require('./templateExtractionTask.cjs');
+const { serializeSkeletonToMarkdown } = require('./pastBidTemplateStore.cjs');
+const { calculateOutlineCoverage, populateResponseTableOutline } = require('./bidPlanningService.cjs');
+const { checkResponseSectionCoverage } = require('./bidQualityService.cjs');
+
+const PAST_BID_TEMPLATE_REF_FILE = '历史标书内容模板.md';
 
 const DEFAULT_ESTIMATED_SECTION_WORDS = 3000;
 const OUTLINE_OUTPUT_FILE = 'outline.json';
@@ -12,6 +17,7 @@ const LEAF_ALLOCATION_FILE = 'leaf-allocation.json';
 const LEAF_ALLOCATION_CONTEXT_FILE = 'leaf-allocation-context.json';
 const OUTLINE_REVIEW_FILE = 'outline-review.json';
 const OUTLINE_REVIEW_CONTEXT_FILE = 'outline-review-context.json';
+const BID_PLAN_FILE = 'bid-plan.json';
 const AI_CONTENT_MODE = 'ai-generate';
 const CONTENT_MODES = ['ai-generate', 'template-fill', 'point-to-point', 'other'];
 
@@ -24,6 +30,11 @@ function createDirectoryNodeSchema(level, root = false) {
       attr: { type: 'string', enum: ['通用', '商务', '资信', '技术', '其他'] },
       branch_id: { type: 'string', minLength: 1 },
     } : {}),
+    technical_topic_ids: {
+      type: 'array',
+      uniqueItems: true,
+      items: { type: 'string', pattern: '^T[0-9A-Za-z_-]+$' },
+    },
   };
   const baseRequired = ['id', 'title', 'description', ...(root ? ['attr'] : [])];
   const leafSchema = {
@@ -297,6 +308,9 @@ function renumberOutline(items, prefix = '') {
       description: String(item?.description || '').trim(),
       ...(prefix ? {} : { attr: item?.attr }),
       ...(!prefix && String(item?.branch_id || '').trim() ? { branch_id: String(item.branch_id).trim() } : {}),
+      ...(Array.isArray(item?.technical_topic_ids) && item.technical_topic_ids.length
+        ? { technical_topic_ids: [...new Set(item.technical_topic_ids.map(String))] }
+        : {}),
       ...(!hasChildren ? {
         content_mode: item?.content_mode,
         ...(item?.content_mode === 'other' && String(item?.content_mode_note || '').trim()
@@ -460,7 +474,7 @@ function collectScoreMappingCoverage(items, scoreDirectoryPlan) {
 }
 
 // 生成供最终 Agent 审核直接采用的宿主程序确定性检查结果。
-function buildOutlineReviewContext({ outline, scoreDirectoryPlan, targetLeafCount }) {
+function buildOutlineReviewContext({ outline, scoreDirectoryPlan, targetLeafCount, bidPlan }) {
   const items = outline?.outline || [];
   const leafCounts = countLeavesByMode(items);
   const structure = collectOutlineStructure(items);
@@ -484,15 +498,41 @@ function buildOutlineReviewContext({ outline, scoreDirectoryPlan, targetLeafCoun
         && structure.invalid_leaf_content_modes.length === 0,
     },
     score_mapping: collectScoreMappingCoverage(items, scoreDirectoryPlan),
+    technical_coverage: calculateOutlineCoverage(bidPlan, outline),
   };
 }
 
-function readJson(content, label) {
+function parseOutlineJson(content) {
+  const raw = String(content || '').trim();
   try {
-    return JSON.parse(String(content || '').trim());
+    return JSON.parse(raw);
+  } catch {
+    // 尝试正则提取 JSON 对象
+    const match = raw.match(/\{[\s\S]*"outline"[\s\S]*\}/);
+    if (match) {
+      try { return JSON.parse(match[0]); } catch {}
+    }
+    throw new Error(`outline.json 不是合法 JSON：${raw ? '解析失败' : '内容为空'}`);
+  }
+}
+
+function readJson(content, label) {
+  const raw = String(content || '').trim();
+  if (!raw) {
+    // 空文件说明 Agent 从未写入该产物；报出可操作的提示，而不是裸的 JSON.parse 异常。
+    throw new Error(`${label} 内容为空，Agent 未写入该文件。请重试该阶段；若反复出现，检查 Agent 是否被 ask-user 中断。`);
+  }
+  try {
+    return JSON.parse(raw);
   } catch (error) {
     throw new Error(`${label}不是合法 JSON：${error?.message || String(error)}`);
   }
+}
+
+// score-planning 阶段的产物骨架。Schema 未对 branches/extra_titles 设 minItems，
+// 因此空骨架是合法起点；Agent 需用真实的评分项规划覆盖它。
+function createEmptyScoreDirectoryPlan() {
+  return { allow_root_changes: false, branches: [], extra_titles: [] };
 }
 
 function normalizeReferenceDocumentIds(storedPlan) {
@@ -532,7 +572,7 @@ ${taskInstruction}
 1. 顶层必须是对象，唯一字段 outline 是一级目录数组；此阶段暂时不要生成 children。
 2. 一级目录 id 是从 1 开始且不重复的连续序号字符串。
 3. title 必须是可直接用于投标文件目录的正式标题，不得包含“附件1”“附件一”“第一章”等编号或前缀。
-4. description 是目录说明。
+4. description 是目录说明，保持简明扼要（每项控制在15-30字以内），防止长篇输出导致截断。
 5. attr 必须从“通用”“商务”“资信”“技术”“其他”中选择。
 ${modeRequirements}
 8. ${OUTLINE_OUTPUT_FILE} 必须是纯 JSON，不包含 Markdown 代码块或解释文字。
@@ -606,20 +646,20 @@ function createChildrenPrompt({ hasOriginalPlan, originalOnly, targetLeafCount, 
   return `请继续使用当前上下文，为 ${OUTLINE_OUTPUT_FILE} 生成完整目录。生成方式和处理顺序由你自主决定，但必须严格遵循评分项目录规划。
 
 要求：
-1. ${branchInstruction}
-2. 以 ${TECHNICAL_SCORE_GROUPS_FILE} 为技术评分项权威清单，以 ${SCORE_DIRECTORY_PLAN_FILE} 为评分项与目录位置的权威规划。
+1. ${branchInstruction} 同时读取 ${BID_PLAN_FILE}，其中 technical_topics 是“招标文件要求最终标书写什么”的权威技术主题清单。
+2. 以 ${TECHNICAL_SCORE_GROUPS_FILE} 为技术评分项权威清单，以 ${SCORE_DIRECTORY_PLAN_FILE} 为评分项与目录位置的权威规划，以 ${BID_PLAN_FILE}.technical_topics 为技术内容覆盖权威清单。不得只复制响应文件格式或技术评分项。
 3. ${mappingInstruction} branch_id 是技术分支稳定标识：对应的最终一级目录必须保留同名 branch_id，即使一级目录新增、删除、改名、重排或重新编号也不得改变；非技术分支一级目录不要填写 branch_id。默认每个评分项形成一个独立节点；多个 mapping 使用相同 target_title 表示用户已批准合并，additional_titles 表示用户已批准将该评分项拆成多个同级节点。
 4. mappings 中的 target_title 是评分项对应节点标题，必须基本保持评分大项的专业表述；detail_points 主要用于生成其下级目录。
-5. extra_titles 是用户已批准增加的同层级大项；除此之外不得自行增加技术评分项中不存在的同层级标题。
+5. extra_titles 是用户已批准增加的评分项同层级大项；Bid Plan 技术主题应在已确认的技术分支内作为评分项下级或专业下级目录展开，不属于擅自修改一级骨架。
 6. “技术评分要求”只能作为评分标准、扣分口径、判定规则和目录说明约束，不能生成独立评分项节点。
 7. ${rootInstruction}
 8. 未纳入评分项目录规划的一级目录和分支保持原样，不得增加子目录。
-9. 如果存在参考知识库或原方案，只能用于完善评分项对应节点的下级结构，不得改变评分项映射或引入未经批准的同层级大项。
+9. 如果存在参考知识库或原方案，只能用于完善评分项对应节点的下级结构，不得改变评分项映射。每个 technical topic 必须至少分配给一个语义合适的目录节点，并把 topic.id 写入该节点 technical_topic_ids；允许一个专业章节聚合多个相关 topic，禁止一个参数生成一个章节。
 10. ${leafInstruction}${LEAF_ALLOCATION_FILE} 中 allocations 使用 branch_id 指向技术分支，不使用可能变化的 root_id。${standaloneLeafInstruction}评分项完整对应和目录质量优先于数量目标。
 11. 每个最终叶子节点必须填写 content_mode：技术方案正文为 ai-generate；从招标文件提取后按模板填写为 template-fill；需要在 Word 页码确定后回填为 point-to-point；其他特殊内容为 other，并用 content_mode_note 说明。父节点不得包含 content_mode 或 content_mode_note。
 12. 任意非叶子节点的 children 至少包含两个节点，不要创建只有一个子节点的冗余层级。
 13. 目录层级可变，但最多六级；一级目录包含 attr，子目录不包含 attr。所有 id 必须使用层级点号编号：一级为 1、2，二级为 2.1、2.2，三级为 2.1.1、2.1.2，后续层级依此类推，并与实际父子位置一致。
-14. title 只写纯标题，不包含章节编号或 Markdown 标记。
+14. title 只写纯标题，不包含章节编号或 Markdown 标记。技术主题覆盖优先于机械凑叶子数，相关的防护、机构或工艺主题应合理聚合，避免 40—100 个碎片章节。
 15. ${OUTLINE_OUTPUT_FILE} 的完整结构示例：${outlineExample}。branch_id 只写在评分规划对应的技术一级目录上；示例只说明字段位置和编号方式，实际层级与标题必须按任务材料生成。
 16. 程序已为 ${OUTLINE_OUTPUT_FILE} 预置 Schema。直接覆盖写回该文件，完成后调用 json-validation 校验，只传 file_path；校验失败后必须先修改文件，再重新校验。`;
 }
@@ -649,10 +689,11 @@ function createOutlineReviewPrompt({ targetLeafCount, actualLeafCount, allowRoot
     : '一级目录已经由用户确认，数量、顺序、标题、描述和属性不得修改。';
   return `请对当前完整技术方案目录执行最终审核，并在用户确认后完成必要修复。
 
-开始审核时一次性并行读取 ${OUTLINE_REVIEW_CONTEXT_FILE}、${OUTLINE_OUTPUT_FILE}、技术评分信息.md 和 ${SCORE_DIRECTORY_PLAN_FILE}，不要探索工作区或读取其他文件。${OUTLINE_REVIEW_CONTEXT_FILE} 是宿主程序计算的确定性审核结果，叶子数量、内容模式数量、最大层级、父节点数量、单子节点和评分节点机械映射均直接采用其中结果，不要重新统计、编写脚本或执行额外结构检查；你只负责评分语义覆盖、近义重复和专业合理性审核。
+开始审核时一次性并行读取 ${OUTLINE_REVIEW_CONTEXT_FILE}、${OUTLINE_OUTPUT_FILE}、${BID_PLAN_FILE}、技术评分信息.md 和 ${SCORE_DIRECTORY_PLAN_FILE}，不要探索工作区或读取其他文件。${OUTLINE_REVIEW_CONTEXT_FILE} 是宿主程序计算的确定性审核结果，叶子数量、内容模式数量、最大层级、父节点数量、评分节点机械映射和 technical_coverage 均直接采用其中结果，不要重新统计、编写脚本或执行额外结构检查；你只负责评分语义覆盖、近义重复和专业合理性审核。
 
 审核维度：${leafCountReview}
 - 评分覆盖：直接以技术评分信息.md 为原始依据，逐项检查其中适合技术方案响应的评分大项是否被目录准确覆盖；结构化评分项和目录规划用于核对已确认的映射，但不能掩盖原始评分信息中的遗漏。
+- 技术覆盖：以 ${BID_PLAN_FILE}.technical_topics 为权威清单。technical_coverage 低于 90 时，必须在现有技术一级骨架内自动补充或合并调整一次，并正确回填 technical_topic_ids；这是自动 Coverage Repair，不询问用户。低于 80 视为失败，修复时禁止一个参数一个章节。
 - 重复目录：检查全部子目录中是否存在重复、近义、含义重叠或仅换一种说法的节点；不同专业分支下确有独立含义的同名标题不应机械判重。
 - 专业合理性：评估目录层级、颗粒度、逻辑顺序、标题表达、节点归属以及内容处理模式是否适合正式技术投标文件。
 
@@ -660,7 +701,7 @@ function createOutlineReviewPrompt({ targetLeafCount, actualLeafCount, allowRoot
 1. 必须先完整审核并形成问题清单，不得边审核边修改。
 2. 如果没有问题，不要修改 ${OUTLINE_OUTPUT_FILE}；写入 ${OUTLINE_REVIEW_FILE}，status=passed、issues=[]、user_feedback=""，summary 说明通过原因。
 3. 如果发现问题，先为每个问题记录 category、problem、推荐 repair 和 confirmation_required，不得提前修改目录。
-4. 只有以下问题可设 confirmation_required=false：标题或说明的专业化优化；不涉及评分项映射节点、目标层级和一级目录的明显重复或近义子目录合并。评分覆盖缺失、叶子数量超出合理范围、评分项目标层级调整、一级目录调整、增加或拆分目录、跨分支移动以及明显结构重排均必须设为 true。
+4. 以下问题设 confirmation_required=false：标题或说明的专业化优化；不涉及评分项映射节点、目标层级和一级目录的明显重复或近义子目录合并；Bid Plan 技术覆盖不足时在已确认技术一级骨架内执行的一次 Coverage Repair。评分覆盖缺失、叶子数量超出合理范围、评分项目标层级调整、一级目录调整、跨分支移动以及其他明显结构重排必须设为 true。
 5. 如果全部问题都不需要确认，可以直接执行文案优化或轻微去重，不得调用 ask-user；完成后设置 status=simple_fix、user_feedback=""。静默修复不得改变评分项映射、评分项目标层级和一级目录，且不得使 AI 生成叶子数量超出程序给出的合理范围。
 6. 只要存在一个 confirmation_required=true 的问题，本轮所有问题都不得提前修改。集中调用一次 ask-user，question 使用多行文本完整列出问题及推荐修复方案；提供 2 至 5 个互斥选项，第一项是推荐修复方案，并提供保留当前目录的选项；另提供一个名为“调整修复方案”等明确业务名称的选项并设置 custom=true，让用户说明具体修改要求，其他选项均设置 custom=false。custom=true 的选项最多只能有一个。
 7. 根据 ask-user 返回的 answer 执行最终处理：用户要求全部或部分修改时更新 ${OUTLINE_OUTPUT_FILE} 并设置 status=user_feedback；用户明确拒绝修改或要求保留现状时不得修改目录并设置 status=user_refuse。将 answer 原文完整写入 user_feedback，修改完成后不得再次询问用户。
@@ -672,8 +713,9 @@ function createOutlineReviewPrompt({ targetLeafCount, actualLeafCount, allowRoot
 }
 
 // 运行 V2 目录业务任务；开发者模式下一级目录确认后并行调度目录任务和独立模版提取任务。
-async function runOutlineGenerationTaskV2({ aiService, agentService, ordinaryAgentService, workspaceStore, knowledgeBaseService, openXmlHelperService, updateTask, checkpointTask, taskControl, payload }) {
+async function runOutlineGenerationTaskV2({ aiService, agentService, ordinaryAgentService, workspaceStore, knowledgeBaseService, openXmlHelperService, pastBidTemplateStore, updateTask, checkpointTask, taskControl, payload }) {
   const storedPlan = workspaceStore.loadTechnicalPlan() || {};
+  const bidPlan = storedPlan.bidPlan || { schema_version: 1, technical_topics: [], required_tables: [] };
   const restoringOutlineSelection = payload?.agent_resume?.phase === 'outline-selection';
   const standaloneTechnical = storedPlan.outlineMode === 'standalone-technical';
   const hasOriginalPlan = Boolean(storedPlan.originalPlanFile);
@@ -692,6 +734,22 @@ async function runOutlineGenerationTaskV2({ aiService, agentService, ordinaryAge
     [OUTLINE_REVIEW_FILE]: OUTLINE_REVIEW_SCHEMA,
   };
 
+  // 可选：用户选了一份历史标书内容模板，作为生成目录时的参考骨架。
+  const referencePastBidTemplateId = String(
+    payload?.reference_past_bid_template_id || storedPlan.referencePastBidTemplateId || '',
+  ).trim();
+  let pastBidTemplateRef = null;
+  if (referencePastBidTemplateId && pastBidTemplateStore) {
+    const pastBidTemplate = pastBidTemplateStore.getTemplate(referencePastBidTemplateId);
+    const skeletonMarkdown = pastBidTemplate ? serializeSkeletonToMarkdown(pastBidTemplate.skeleton) : '';
+    if (skeletonMarkdown) {
+      pastBidTemplateRef = { path: PAST_BID_TEMPLATE_REF_FILE, content: skeletonMarkdown };
+    }
+  }
+  const pastBidTemplateHint = pastBidTemplateRef
+    ? '可参考 历史标书内容模板.md 中同类标书的章节骨架、要点与专业写法来组织目录与标题表达，提升完整性与专业性。注意：历史标书内容模板.md 只是参考，若其结构与招标要求冲突，一律以响应文件要求.md（及技术评分信息.md）为准。'
+    : '';
+
   let initialFiles;
   let taskInstruction;
   if (originalOnly) {
@@ -702,13 +760,18 @@ async function runOutlineGenerationTaskV2({ aiService, agentService, ordinaryAge
       { path: '响应文件要求.md', content: responseFileRequirements },
       ...(standaloneTechnical ? [{ path: '技术评分信息.md', content: storedPlan.techRequirements || '' }] : []),
       { path: '项目概述.md', content: storedPlan.projectOverview || '' },
+      { path: BID_PLAN_FILE, content: JSON.stringify(bidPlan, null, 2) },
       ...(hasOriginalPlan ? [{ path: '原方案.md', content: originalPlan }] : []),
+      ...(pastBidTemplateRef ? [pastBidTemplateRef] : []),
     ];
     taskInstruction = standaloneTechnical
-      ? '严格按照技术评分信息.md 中适合技术方案响应的评分大项组织一级目录，只生成技术方案独立分册。评分大项原文、顺序和数量是一级目录的权威依据；响应文件要求.md 只提供装订和响应约束，项目概述.md 仅用于理解背景和术语，原方案.md 仅用于参考下级标题表达。'
+      ? `严格按照技术评分信息.md 中适合技术方案响应的评分大项组织一级目录，只生成技术方案独立分册。评分大项原文、顺序和数量是一级目录的权威依据；${BID_PLAN_FILE} 提供项目类型和完整技术主题用于描述与后续展开；响应文件要求.md 只提供装订和响应约束。`
       : hasOriginalPlan
-        ? '严格按照响应文件要求.md 组织一级目录，它是目录结构和标题来源的唯一依据。项目概述.md 仅用于理解背景和术语，不得据此新增一级目录；原方案.md 仅用于参考标题表达。'
-        : '严格按照响应文件要求.md 组织一级目录，它是目录结构和标题来源的唯一依据。项目概述.md 仅用于理解背景和术语，不得据此新增一级目录。';
+        ? `以响应文件要求.md 规定的投标文件格式为强约束骨架，原有部分不得无故删除或改序；同时读取 ${BID_PLAN_FILE}，若骨架缺少承载完整技术主题的技术分支或明确 required_tables，可在合适位置补充。原方案.md 仅用于参考标题表达。`
+        : `以响应文件要求.md 规定的投标文件格式为强约束骨架，原有部分不得无故删除或改序；同时读取 ${BID_PLAN_FILE}，若骨架缺少承载完整技术主题的技术分支或明确 required_tables，可在合适位置补充。不得简单复制招标格式后结束。`;
+    if (pastBidTemplateHint) {
+      taskInstruction += `\n${pastBidTemplateHint}`;
+    }
   }
 
   let logs = restoringOutlineSelection
@@ -740,6 +803,7 @@ async function runOutlineGenerationTaskV2({ aiService, agentService, ordinaryAge
           run_id: task.task_id,
           resume_payload: {
             reference_knowledge_document_ids: referenceDocumentIds,
+            reference_past_bid_template_id: referencePastBidTemplateId || undefined,
             outline_mode: storedPlan.outlineMode,
             outline_expansion_mode: storedPlan.outlineExpansionMode,
             word_control_options: wordControlOptions,
@@ -843,6 +907,7 @@ async function runOutlineGenerationTaskV2({ aiService, agentService, ordinaryAge
             allocations,
           }, null, 2),
         },
+        ...(pastBidTemplateRef ? [pastBidTemplateRef] : []),
       ],
     };
   }
@@ -852,6 +917,7 @@ async function runOutlineGenerationTaskV2({ aiService, agentService, ordinaryAge
       outline: finalOutline,
       scoreDirectoryPlan,
       targetLeafCount,
+      bidPlan,
     });
     publish('子目录生成完成，正在准备最终审核', 88, {
       outline: {
@@ -869,6 +935,9 @@ async function runOutlineGenerationTaskV2({ aiService, agentService, ordinaryAge
         { path: OUTLINE_OUTPUT_FILE, content: JSON.stringify(finalOutline, null, 2) },
         { path: SCORE_DIRECTORY_PLAN_FILE, content: JSON.stringify(scoreDirectoryPlan, null, 2) },
         { path: OUTLINE_REVIEW_CONTEXT_FILE, content: JSON.stringify(reviewContext, null, 2) },
+        { path: BID_PLAN_FILE, content: JSON.stringify(bidPlan, null, 2) },
+        // 预置骨架：Agent 若在审核前被中断，readJson 不会读到空内容。
+        { path: OUTLINE_REVIEW_FILE, content: JSON.stringify({ status: 'passed', issues: [], user_feedback: '', summary: '' }, null, 2) },
       ],
     };
   }
@@ -889,11 +958,20 @@ async function runOutlineGenerationTaskV2({ aiService, agentService, ordinaryAge
       initial_stage: 'initial-outline',
       initial_stage_index: 0,
       json_validation_schemas: jsonValidationSchemas,
-      max_retries: 0,
+      validateOutput: (candidate) => {
+        const raw = String(candidate?.output_content || '').trim();
+        if (!raw) throw new Error('outline.json 输出为空');
+        const parsed = parseOutlineJson(raw);
+        if (!Array.isArray(parsed?.outline) || parsed.outline.length === 0) {
+          throw new Error('outline.json 缺少有效的 outline 一级目录数组');
+        }
+        return { count: parsed.outline.length };
+      },
+      max_retries: 2,
       onActivity: publishAgentActivity,
       onCheckpoint: syncAgentCheckpoint,
     });
-    const generated = readJson(initialResult.output_content, OUTLINE_OUTPUT_FILE);
+    const generated = parseOutlineJson(initialResult.output_content);
     const items = generated.outline || [];
     const defaultSelectedIds = items.filter((item) => item.attr === '技术').map((item) => item.id);
     const selection = { items, selected_ids: defaultSelectedIds, confirmed: false };
@@ -977,6 +1055,11 @@ async function runOutlineGenerationTaskV2({ aiService, agentService, ordinaryAge
     files: [
       { path: OUTLINE_OUTPUT_FILE, content: JSON.stringify({ outline: lockedRoots }, null, 2) },
       { path: '技术评分信息.md', content: storedPlan.techRequirements || '' },
+      { path: BID_PLAN_FILE, content: JSON.stringify(bidPlan, null, 2) },
+      // 预置空骨架，避免 Agent 未写文件时 readJson 读到空内容报 "Unexpected end of JSON input"。
+      // 两个文件的 Schema 均允许空数组（branches/extra_titles 无 minItems 约束）。
+      { path: SCORE_DIRECTORY_PLAN_FILE, content: JSON.stringify(createEmptyScoreDirectoryPlan(), null, 2) },
+      { path: TECHNICAL_SCORE_GROUPS_FILE, content: JSON.stringify({ groups: [] }, null, 2) },
       ...knowledgeFiles,
     ],
     signal: parallelSignal,
@@ -1065,6 +1148,16 @@ async function runOutlineGenerationTaskV2({ aiService, agentService, ordinaryAge
                 fixed_ai_leaf_count: fixedAiLeafCount,
                 allocatable_ai_leaf_count: allocatedAiLeafCount,
                 technical_branches: technicalBranches,
+              }, null, 2),
+            }, {
+              // 预置骨架：Agent 未写时 readJson 不会读到空内容。
+              path: LEAF_ALLOCATION_FILE,
+              content: JSON.stringify({
+                mode: 'allocated',
+                target_ai_leaf_count: targetLeafCount,
+                fixed_ai_leaf_count: fixedAiLeafCount,
+                allocatable_ai_leaf_count: allocatedAiLeafCount,
+                allocations: [],
               }, null, 2),
             }],
           };
@@ -1174,7 +1267,23 @@ async function runOutlineGenerationTaskV2({ aiService, agentService, ordinaryAge
     scoreDirectoryPlan = synchronizeScoreDirectoryPlan(scoreDirectoryPlan, finalOutline.outline);
     actualLeafCount = countAiLeaves(finalOutline.outline);
   }
-  const persistedFinalOutline = stripOutlineInternalFields(finalOutline);
+  const technicalCoverage = calculateOutlineCoverage(bidPlan, finalOutline);
+  if (!technicalCoverage.computable) {
+    // 没有技术主题是 Bid Plan 提取失败，不是「覆盖完美」；此时不能拿 100 分放行。
+    logs = [...logs, '未从 Bid Plan 提取到技术主题，技术覆盖率无法计算，已跳过 80% 失败线；请人工确认目录是否覆盖招标技术要求。'];
+  } else if (technicalCoverage.coverage_score < 80) {
+    throw new Error(`目录技术主题覆盖率仅 ${technicalCoverage.coverage_score}%（${technicalCoverage.covered_count}/${technicalCoverage.total_count}），低于 80% 失败线；请重新生成目录。`);
+  }
+  // 招标文件规定的响应文件章节是合规骨架，与「技术主题覆盖」是两把不同尺子，必须单独量。
+  const responseSectionCoverage = checkResponseSectionCoverage(responseFileRequirements, finalOutline);
+  if (responseSectionCoverage.computable && responseSectionCoverage.missing_required.length) {
+    logs = [...logs, `招标响应文件要求的以下章节未在目录中落地：${responseSectionCoverage.missing_required.map((item) => `${item.name}（${item.category_label}）`).join('、')}。`];
+  }
+  const responseTablePopulation = populateResponseTableOutline(
+    stripOutlineInternalFields(finalOutline),
+    storedPlan.responseTables || {},
+  );
+  const persistedFinalOutline = responseTablePopulation.outlineData;
   const completionLog = !extractTemplate
     ? '目录生成与审核完成'
     : templateResult.status === 'skipped'
@@ -1198,6 +1307,8 @@ async function runOutlineGenerationTaskV2({ aiService, agentService, ordinaryAge
         target_leaf_count: targetLeafCount,
         leaf_counts_by_mode: countLeavesByMode(finalOutline.outline),
         word_adjustment_attempts: wordAdjustmentAttempts,
+        technical_coverage: technicalCoverage,
+        response_section_coverage: responseSectionCoverage,
         ...(leafWarning ? { word_adjustment_warning: leafWarning, word_adjustment_warning_kind: 'leaf-count' } : {}),
       },
       ...(extractTemplate ? {
@@ -1223,6 +1334,16 @@ async function runOutlineGenerationTaskV2({ aiService, agentService, ordinaryAge
     contentGenerationPlans: {},
     contentGenerationRuntime: undefined,
     contentIllustrationPlan: undefined,
+    qualityCheck: {
+      technical_coverage: technicalCoverage,
+      response_section_coverage: responseSectionCoverage,
+      parameter_conflicts: [],
+      duplicate_sections: [],
+      missing_tables: (bidPlan.required_tables || [])
+        .map((item) => item.type)
+        .filter((type) => !storedPlan.responseTables?.[type] || !responseTablePopulation.populated_types.includes(type)),
+      unsupported_claims: [],
+    },
   });
   task = finalCheckpoint.task;
   agentService.updatePersistentTask(OUTLINE_AGENT_TASK_KEY, {
@@ -1259,10 +1380,12 @@ async function runOutlineGenerationTaskV2({ aiService, agentService, ordinaryAge
 module.exports = {
   runOutlineGenerationTaskV2,
   OUTLINE_OUTPUT_FILE,
+  parseOutlineJson,
   OUTLINE_JSON_SCHEMA,
   buildFinalOutline,
   stripOutlineInternalFields,
   readJson,
+  createEmptyScoreDirectoryPlan,
   formatProgressTitle,
   createInitialPrompt,
   createScorePlanningPrompt,

@@ -8,7 +8,6 @@ import ContentEditPage from './ContentEditPage';
 import { TemplatePreview } from '../../export-format/pages/ExportFormatPage';
 import { useTechnicalPlanWorkflow } from '../hooks/useTechnicalPlanWorkflow';
 import { getBidAnalysisTasks } from '../services/bidAnalysisWorkflow';
-import { trackPageView } from '../../../shared/analytics/analytics';
 import { AppDialog, FloatingToolbar, ProgressBar, ToolbarArrowLeftIcon, ToolbarArrowRightIcon, ToolbarDocumentIcon, ToolbarSparkleIcon, useToast } from '../../../shared/ui';
 import type { BackgroundTaskState, BidAnalysisTasks, ContentGenerationOptions, GlobalFactGroupState, GlobalFactsMode, SaveOutlineRequest, SaveOutlineSelectionRequest, TechnicalPlanState, TechnicalPlanStep, TechnicalPlanWorkflowKind } from '../types';
 import { DEFAULT_OUTLINE_WORD_CONTROL_OPTIONS } from '../../../shared/types';
@@ -98,6 +97,7 @@ const resetState = {
   outlineWordControlOptions: { ...DEFAULT_OUTLINE_WORD_CONTROL_OPTIONS },
   outlineWordControlSnapshot: undefined,
   referenceKnowledgeDocumentIds: [] as string[],
+  referencePastBidTemplateId: undefined as string | undefined,
   bidSectionExtractionTask: undefined,
   bidAnalysisTask: undefined,
   outlineGenerationTask: undefined,
@@ -550,7 +550,6 @@ function TechnicalPlanHome({ workflowKind, registerLeaveGuard, onSectionChange }
   useEffect(() => {
     if (!hydrated) return;
 
-    trackPageView(`${workflowKind}/${state.step}`);
     void window.yibiao?.ui?.setCurrentView({ section: workflowKind, step: state.step });
   }, [hydrated, state.step, workflowKind]);
 
@@ -964,6 +963,9 @@ function TechnicalPlanHome({ workflowKind, registerLeaveGuard, onSectionChange }
         project_name: state.outlineData.project_name,
         outline: state.outlineData.outline,
         export_format: latestExportFormat,
+        global_facts: state.globalFacts,
+        bid_analysis_tasks: state.bidAnalysisTasks,
+        project_overview: state.projectOverview,
       });
       if (result?.canceled) {
         setExportProgress(initialExportProgress);
@@ -1341,7 +1343,10 @@ function TechnicalPlanHome({ workflowKind, registerLeaveGuard, onSectionChange }
           outlineWordControlOptions={state.outlineWordControlOptions}
           outlineWordControlSnapshot={state.outlineWordControlSnapshot}
           referenceKnowledgeDocumentIds={state.referenceKnowledgeDocumentIds}
+          referencePastBidTemplateId={state.referencePastBidTemplateId}
           outlineData={state.outlineData}
+          bidPlan={state.bidPlan}
+          qualityCheck={state.qualityCheck}
           task={state.outlineGenerationTask}
           contentTaskStatus={state.contentGenerationTask?.status}
           aiAdjustmentRunning={isOutlineAdjusting}
@@ -1377,6 +1382,12 @@ function TechnicalPlanHome({ workflowKind, registerLeaveGuard, onSectionChange }
           sections={state.contentGenerationSections}
           onContentGenerationOptionsChange={saveContentGenerationOptions}
           onContentSaved={saveChapterContent}
+          onRefreshState={async () => {
+            const saved = await window.yibiao?.technicalPlan?.loadState?.();
+            if (saved) {
+              setState((prev) => ({ ...prev, ...saved }));
+            }
+          }}
         />
       )}
       {state.step === 'expand' && (

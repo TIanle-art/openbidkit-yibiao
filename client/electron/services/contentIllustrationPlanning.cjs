@@ -1,11 +1,15 @@
 const crypto = require('node:crypto');
 
-const ILLUSTRATION_PLAN_VERSION = 3;
+const ILLUSTRATION_PLAN_VERSION = 4;
 const ROOT_PARENT_ID = '__root__';
-const ILLUSTRATION_KINDS = ['html', 'ai', 'mermaid'];
+const ILLUSTRATION_KINDS = ['asset', 'html', 'ai', 'mermaid'];
 const ILLUSTRATION_KIND_ORDER = new Map(ILLUSTRATION_KINDS.map((kind, index) => [kind, index]));
 const AI_IMAGE_TYPES = new Set(['engineering_diagram', 'realistic_photo']);
 const MERMAID_IMAGE_TYPES = new Set(['process', 'hierarchy', 'responsibility']);
+const ASSET_IMAGE_TYPES = new Set(['library_image']);
+const ASSET_IMAGE_TYPE_DESCRIPTIONS = {
+  library_image: '图片库素材：直接复用「图片知识库」中已有的图示/实景素材图，不重新生成；适合设备、现场、架构、流程等有现成素材的场景。',
+};
 const AI_IMAGE_TYPE_DESCRIPTIONS = {
   engineering_diagram: '专业工程图示：用于展示设备、系统组件、部署位置、连接关系或工程实施场景，强调结构与关系；不用于步骤流转、组织层级或职责分工。',
   realistic_photo: '专业实景图片：用于表现设备、机房、监控中心、施工、巡检或维护现场等可真实拍摄的对象和环境；不用于抽象系统架构、流程或组织关系。',
@@ -43,7 +47,7 @@ function resolveSectionContent(item, sections) {
 }
 
 // 从真实目录树构建 Agent 输入和程序校验索引。
-function buildIllustrationPlanningContext({ outlineData, sections, options, aiImagesAvailable = false }) {
+function buildIllustrationPlanningContext({ outlineData, sections, options, aiImagesAvailable = false, libraryImages = [] }) {
   const sectionMap = new Map();
   const eligibleSectionIds = [];
   const markdownLines = ['# 技术方案正文', ''];
@@ -96,6 +100,10 @@ function buildIllustrationPlanningContext({ outlineData, sections, options, aiIm
   const outline = visit(outlineData?.outline || []);
   const eligibleCount = eligibleSectionIds.length;
   const allowedHtmlTypes = parseHtmlImageTypes(options?.htmlImageTypes);
+  const usableLibraryImages = (Array.isArray(libraryImages) ? libraryImages : [])
+    .filter((item) => item?.imageId && item?.asset_url && (item?.metadataStatus === 'ready' || item?.description || item?.tags))
+    .slice(0, 200);
+  const assetCatalog = new Map(usableLibraryImages.map((item) => [String(item.imageId), item]));
   const config = {
     ai: {
       enabled: Boolean(options?.useAiImages) && Boolean(aiImagesAvailable),
@@ -114,6 +122,12 @@ function buildIllustrationPlanningContext({ outlineData, sections, options, aiIm
       limit: normalizeLimit(options?.maxHtmlImages, 10, eligibleCount),
       allowed_types: allowedHtmlTypes,
     },
+    asset: {
+      enabled: usableLibraryImages.length > 0,
+      limit: normalizeLimit(6, 6, eligibleCount),
+      allowed_types: [...ASSET_IMAGE_TYPES],
+      type_descriptions: ASSET_IMAGE_TYPE_DESCRIPTIONS,
+    },
     eligible_section_ids: eligibleSectionIds,
   };
   for (const kind of ILLUSTRATION_KINDS) {
@@ -123,6 +137,7 @@ function buildIllustrationPlanningContext({ outlineData, sections, options, aiIm
   return {
     sectionMap,
     eligibleSectionIds,
+    assetCatalog,
     config,
     files: [
       { path: 'technical-plan.md', content: markdownLines.join('\n').trim() },
@@ -135,30 +150,44 @@ function buildIllustrationPlanningContext({ outlineData, sections, options, aiIm
         }, null, 2),
       },
       { path: 'illustration-config.json', content: JSON.stringify(config, null, 2) },
+      {
+        path: 'illustration-assets.json',
+        content: JSON.stringify(usableLibraryImages.map((item) => ({
+          asset_id: item?.imageId,
+          title: item?.name || item?.fileName || '图片',
+          description: item?.description || '',
+          tags: item?.tags || '',
+          asset_url: item?.asset_url,
+          mime: item?.mime,
+          width: item?.width,
+          height: item?.height,
+        })), null, 2),
+      },
     ],
   };
 }
 
 // 构建 Agent 全文图片编排任务说明。
 function buildIllustrationPlanningPrompt() {
-  return `请基于当前工作目录中的三个输入文件完成投标文件技术方案的全文图片编排，即按要求设计投标文件应该在哪个位置，添加什么样的图片：
+  return `请基于当前工作目录中的四个输入文件完成投标文件技术方案的全文图片编排，即按要求设计投标文件应该在哪个位置，添加什么样的图片：
 
 - technical-plan.md：投标文件全文，叶子小节由 yibiao-section-start / yibiao-section-end 标记。
 - outline-tree.json：目录树，用于核对小节 ID、父子关系和顺序，要确保配图的位置一定是真实存在于目录树中的。
-- illustration-config.json：三类图片是否启用、允许类型、类型中文说明、上限和可编排小节 ID。
+- illustration-config.json：四类图片是否启用、允许类型、类型中文说明、上限和可编排小节 ID。
+- illustration-assets.json：图片知识库中已有的素材图清单（asset_id/title/description/tags/asset_url/宽高）。请依据每条素材的 title、description、tags 理解图片真实内容，再判断是否匹配该章节；严禁仅凭文件名（如 IMG_xxx.png）推测图片内容。若能复用其中合适的图，优先选用 asset 类型的图，无需重新生成。
 
 工作要求：
-1. 图片有三类：AI生成图片、mermaid图片、html生成类图网页，具体应用哪种，可以查看illustration-config.json的配置，自行判断。
+1. 图片有四种：AI生成图片、mermaid图片、html生成类图网页、图片库素材(asset)。优先查看 illustration-assets.json，若某章节有合适的现有素材图，优先用 asset 类型直接复用；仅当素材库没有合适图片时，才考虑 AI/Mermaid/HTML 生成。选择 asset 时必须结合素材的 description/tags/title 判断内容与该章节匹配，不能只看文件名。具体应用哪种，结合 illustration-config.json 的配置自行判断。
 2. illustration-config.json中limit是每类图片的配图上限，如果投标文件实在不适合配图，可以低于limit，但绝不能高于limit。
 3. 为每项生成 title，title 是最终写入正文的完整图注文本，建议控制在4-15个字，禁止冗长。
 4. 统一编排 title，标准化后不得重复；相同 image_type 可以使用多次，但每张图的标题、业务对象和视觉重点必须明显不同，避免在不同章节编排相同或相似图片。
-5. kind 只能是 html、mermaid、ai；image_type 必须来自对应 allowed_types。遇到英文类型标识时，必须先阅读对应 type_descriptions 的中文含义、适用场景和不适用场景，再决定是否选用，不得仅按英文单词猜测。
-6. AI 图片适合设备、现场、工程空间、实体部署等具象内容；Mermaid 只用于简单流程、层级和职责关系；HTML 用于配置允许的复杂图表类型。html也可以生成流程、层级和职责关系，根据内容判断如果生成内容较复杂，改用html替代mermaid。
-7. AI 和 Mermaid 每项只能引用一个正文叶子小节，placement 必须为 after。
+5. kind 只能是 html、mermaid、ai、asset；image_type 必须来自对应 allowed_types。遇到英文类型标识时，必须先阅读对应 type_descriptions 的中文含义、适用场景和不适用场景，再决定是否选用，不得仅按英文单词猜测。
+6. AI 图片适合设备、现场、工程空间、实体部署等具象内容；Mermaid 只用于简单流程、层级和职责关系；HTML 用于配置允许的复杂图表类型；asset 用于复用图片库已有素材。html也可以生成流程、层级和职责关系，根据内容判断如果生成内容较复杂，改用html替代mermaid。
+7. AI、Mermaid 和 asset 每项只能引用一个正文叶子小节，placement 必须为 after；asset 项必须同时给出 asset_id 和 asset_url，两者必须来自 illustration-assets.json 的同一条记录。
 8. HTML 可以引用一个小节，也可以引用同一直接父目录下顺序连续的多个叶子小节；单节 placement 必须为 after。
 9. HTML 多节说明类图片使用 before，表示插入组内第一节正文前；总结类图片使用 after，表示插入组内最后一节正文后。
 10. priority 只能是 1-5 的整数，5 表示最值得配图。
-11. 同一小节只允许编排一张图片，包含在html多节图组中，也算该小节已编排，三种图片优先级html>AI生成图片>mermaid，如果一个小节同时适配多种图片，按以上优先级执行。
+11. 同一小节只允许编排一张图片，包含在 HTML 多节图组中也算已编排。冲突时按 asset > HTML > AI 生成图片 > Mermaid 选择；同一 asset_id 在整份方案中最多使用一次。
 12. 输出前必须重新读取 outline-tree.json，确认所有 section_ids 真实存在、属于可编排叶子，并确认 HTML 多节组同父且连续；同时通读全部 title，确认没有重复标题或仅替换章节名称的相似主题。
 13. 只创建 illustration-plan.json，不要修改输入文件，不要输出其他结果文件。
 
@@ -166,12 +195,14 @@ illustration-plan.json 只能使用以下结构：
 {
   "items": [
     {
-      "kind": "html",
-      "image_type": "进度网络图",
-      "title": "核心业务上线实施进度网络图",
-      "section_ids": ["3.2.1", "3.2.2"],
-      "placement": "before",
-      "priority": 5
+      "kind": "asset",
+      "image_type": "library_image",
+      "title": "核心设备现场部署图",
+      "section_ids": ["3.2.1"],
+      "placement": "after",
+      "priority": 5,
+      "asset_id": "illustration-assets.json 中的真实 ID",
+      "asset_url": "illustration-assets.json 中同一条记录的真实 URL"
     }
   ]
 }`;
@@ -218,6 +249,8 @@ function normalizeCandidate(item, index) {
     section_ids: Array.isArray(source.section_ids) ? source.section_ids.map((id) => String(id || '').trim()) : [],
     placement: String(source.placement || '').trim(),
     priority: Number(source.priority),
+    asset_url: singleLine(source.asset_url),
+    asset_id: singleLine(source.asset_id),
     outputIndex: index,
   };
 }
@@ -252,6 +285,10 @@ function validateCandidate(candidate, context) {
   if (sections.some((section) => !section?.eligible)) {
     throw new Error(`图片候选包含无效正文小节：${candidate.section_ids.join(', ')}`);
   }
+  if (candidate.kind === 'asset') {
+    const asset = context.assetCatalog?.get(candidate.asset_id);
+    if (!asset || asset.asset_url !== candidate.asset_url) throw new Error(`asset 图片候选不存在或 ID 与 URL 不匹配：${candidate.asset_id || 'empty'}`);
+  }
   if (candidate.kind !== 'html' && candidate.section_ids.length !== 1) {
     throw new Error(`${candidate.kind} 图片只能编排到一个小节`);
   }
@@ -272,7 +309,7 @@ function validateCandidate(candidate, context) {
   return { ...candidate, firstOrder: sections[0].order };
 }
 
-// 解析、严格校验并按 HTML > AI > Mermaid 处理上限和冲突。
+// 解析、严格校验并按素材 > HTML > AI > Mermaid 处理上限和冲突。
 function resolveIllustrationPlan(content, context) {
   const parsed = typeof content === 'string' ? extractJsonObject(content) : content;
   if (!parsed || typeof parsed !== 'object' || !Array.isArray(parsed.items)) {
@@ -281,7 +318,7 @@ function resolveIllustrationPlan(content, context) {
   const extraRootFields = Object.keys(parsed).filter((key) => key !== 'items');
   if (extraRootFields.length) throw new Error(`Agent 图片编排结果包含多余字段：${extraRootFields.join(', ')}`);
 
-  const allowedFields = new Set(['kind', 'image_type', 'title', 'section_ids', 'placement', 'priority']);
+  const allowedFields = new Set(['kind', 'image_type', 'title', 'section_ids', 'placement', 'priority', 'asset_id', 'asset_url']);
   const candidates = parsed.items.map((item, index) => {
     const extraFields = Object.keys(item || {}).filter((key) => !allowedFields.has(key));
     if (extraFields.length) throw new Error(`图片候选包含多余字段：${extraFields.join(', ')}`);
@@ -289,9 +326,10 @@ function resolveIllustrationPlan(content, context) {
   });
 
   const occupiedSectionIds = new Set();
+  const usedAssetIds = new Set();
   const selected = [];
-  const candidateStats = { ai: 0, mermaid: 0, html: 0 };
-  const selectedStats = { ai: 0, mermaid: 0, html: 0 };
+  const candidateStats = { ai: 0, mermaid: 0, html: 0, asset: 0 };
+  const selectedStats = { ai: 0, mermaid: 0, html: 0, asset: 0 };
   for (const candidate of candidates) candidateStats[candidate.kind] += 1;
 
   for (const kind of ILLUSTRATION_KINDS) {
@@ -301,9 +339,11 @@ function resolveIllustrationPlan(content, context) {
     for (const candidate of sorted) {
       if (selectedStats[kind] >= context.config[kind].limit) continue;
       if (candidate.section_ids.some((id) => occupiedSectionIds.has(id))) continue;
+      if (candidate.kind === 'asset' && usedAssetIds.has(candidate.asset_id)) continue;
       selected.push(candidate);
       selectedStats[kind] += 1;
       for (const id of candidate.section_ids) occupiedSectionIds.add(id);
+      if (candidate.kind === 'asset') usedAssetIds.add(candidate.asset_id);
     }
   }
 
@@ -319,13 +359,14 @@ function resolveIllustrationPlan(content, context) {
     }
     titleByKey.set(titleKey, candidate.title);
   }
-  const planItems = selected.map(({ kind, image_type, title, section_ids, placement, priority }) => ({
+  const planItems = selected.map(({ kind, image_type, title, section_ids, placement, priority, asset_id, asset_url }) => ({
     kind,
     image_type,
     title,
     section_ids,
     placement,
     priority,
+    ...(kind === 'asset' ? { asset_id, asset_url } : {}),
   }));
   const revision = stableHash(planItems).slice(0, 24);
   return {
@@ -335,7 +376,7 @@ function resolveIllustrationPlan(content, context) {
       items: planItems.map((item) => ({
         item_id: stableHash(item).slice(0, 24),
         ...item,
-        generation: { status: 'pending' },
+        generation: { status: 'pending', ...(item.kind === 'asset' ? { asset_url: item.asset_url } : {}) },
       })),
       updated_at: new Date().toISOString(),
     },

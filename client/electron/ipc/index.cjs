@@ -6,16 +6,20 @@ const { registerConfigIpc } = require('./configIpc.cjs');
 const { registerDeveloperIpc } = require('./developerIpc.cjs');
 const { registerDuplicateCheckIpc } = require('./duplicateCheckIpc.cjs');
 const { registerExportIpc } = require('./exportIpc.cjs');
+const { registerExportFormatIpc } = require('./exportFormatIpc.cjs');
 const { registerFileIpc } = require('./fileIpc.cjs');
 const { registerKnowledgeBaseIpc } = require('./knowledgeBaseIpc.cjs');
 const { registerLicenseIpc } = require('./licenseIpc.cjs');
 const { registerRejectionCheckIpc } = require('./rejectionCheckIpc.cjs');
+const { registerPastBidTemplateIpc } = require('./pastBidTemplateIpc.cjs');
 const { registerTaskIpc } = require('./taskIpc.cjs');
 const { registerTechnicalPlanIpc } = require('./technicalPlanIpc.cjs');
 const { registerFeasibilityReportIpc } = require('./feasibilityReportIpc.cjs');
 const { registerTemplateIpc } = require('./templateIpc.cjs');
+const { registerImageLibraryIpc } = require('./imageLibraryIpc.cjs');
 const { registerSystemFontIpc } = require('./systemFontIpc.cjs');
 const { registerPluginIpc } = require('./pluginIpc.cjs');
+const { registerFullFidelityBidIpc } = require('./fullFidelityBidIpc.cjs');
 const pluginService = require('../services/pluginService.cjs');
 const { createAgentService } = require('../services/agentService.cjs');
 const { createAiService } = require('../services/aiService.cjs');
@@ -38,10 +42,14 @@ const { createAgentWorkspaceService } = require('../services/agentWorkspaceServi
 const { createTaskLogStore } = require('../services/taskLogStore.cjs');
 const { createTechnicalPlanStore } = require('../services/technicalPlanStore.cjs');
 const { createFeasibilityReportStore } = require('../services/feasibilityReportStore.cjs');
+const { createPastBidTemplateStore } = require('../services/pastBidTemplateStore.cjs');
 const { createTemplateStore } = require('../services/templateStore.cjs');
+const { createImageLibraryService } = require('../services/imageLibraryService.cjs');
 const { checkRequiredOnlineServices, getRequiredOnlineServiceStatus } = require('../services/requiredOnlineServices.cjs');
 const { initLocalImageRenderService } = require('../services/localImageRenderService.cjs');
 const { createOpenXmlHelperService } = require('../services/openXmlHelperService.cjs');
+const { createMasterBidDecompositionService } = require('../services/masterBidDecompositionService.cjs');
+const { createFullFidelityBidAssemblyService } = require('../services/fullFidelityBidAssemblyService.cjs');
 
 let pendingUiCurrentView = null;
 let agentWorkspaceServiceRef = null;
@@ -186,6 +194,29 @@ const workspaceDatabaseChannels = [
   'templates:create',
   'templates:update',
   'templates:delete',
+  'templates:derive-from-file',
+  'past-bid-template:list',
+  'past-bid-template:get',
+  'past-bid-template:create',
+  'past-bid-template:delete',
+  'past-bid-template:read-source',
+  'past-bid-template:start-extract',
+  'past-bid-template:save-markdown',
+  'past-bid-template:export-word',
+  'image-library:list-folders',
+  'image-library:create-folder',
+  'image-library:rename-folder',
+  'image-library:delete-folder',
+  'image-library:list-images',
+  'image-library:upload-images',
+  'image-library:delete-image',
+  'image-library:delete-images',
+  'image-library:move-image',
+  'image-library:rename-image',
+  'image-library:update-image-meta',
+  'image-library:describe-images',
+  'image-library:list-document-images',
+  'image-library:import-document-images',
 ];
 
 function clearWorkspaceDatabaseIpc() {
@@ -257,8 +288,11 @@ function registerWorkspaceDatabaseServices({ app, configStore, aiService, agentS
   const duplicateCheckStore = createDuplicateCheckStore({ app, db: sqliteDatabase.db, taskLogStore });
   const rejectionCheckStore = createRejectionCheckStore({ app, db: sqliteDatabase.db, fileService, technicalPlanStore, taskLogStore });
   const templateStore = createTemplateStore({ db: sqliteDatabase.db });
+  const pastBidTemplateStore = createPastBidTemplateStore({ app, db: sqliteDatabase.db });
+  const imageLibraryService = createImageLibraryService({ app, db: sqliteDatabase.db });
+  imageLibraryService.setAiService?.(aiService);
   const duplicateCheckService = createDuplicateCheckService({ app, configStore, workspaceStore: duplicateCheckStore });
-  const taskService = createTaskService({ aiService, agentService, autoConfirmationService, technicalPlanStore, rejectionCheckStore, duplicateCheckStore, feasibilityReportStore, knowledgeBaseService, duplicateCheckService, openXmlHelperService });
+  const taskService = createTaskService({ aiService, agentService, autoConfirmationService, technicalPlanStore, rejectionCheckStore, duplicateCheckStore, feasibilityReportStore, knowledgeBaseService, imageLibraryService, duplicateCheckService, openXmlHelperService, pastBidTemplateStore });
   const agentWorkspaceService = createAgentWorkspaceService({ agentService, taskService, technicalPlanStore, feasibilityReportStore });
   agentWorkspaceServiceRef = agentWorkspaceService;
   technicalPlanStore.setAgentWorkspaceChangeListener(() => agentWorkspaceService.emitWorkspacesChanged());
@@ -269,11 +303,14 @@ function registerWorkspaceDatabaseServices({ app, configStore, aiService, agentS
 
   clearWorkspaceDatabaseIpc();
   registerKnowledgeBaseIpc({ knowledgeBaseService });
-  registerTechnicalPlanIpc({ technicalPlanStore, taskService });
+  registerTechnicalPlanIpc({ technicalPlanStore, taskService, aiService, knowledgeBaseService });
   registerFeasibilityReportIpc({ feasibilityReportStore, taskService });
   registerDuplicateCheckIpc({ duplicateCheckStore });
   registerRejectionCheckIpc({ rejectionCheckStore, taskService });
   registerTemplateIpc({ templateStore });
+  registerPastBidTemplateIpc({ pastBidTemplateStore, templateStore, taskService, fileService });
+  registerExportFormatIpc();
+  registerImageLibraryIpc({ imageLibraryService });
   registerTaskIpc({ taskService });
   updateStatus({ phase: 'ready', ready: true, message: '本地数据库已就绪' });
   
@@ -402,6 +439,9 @@ function registerIpcHandlers({ app, mainWindow, checkAndDownloadUpdate, triggerU
   registerFileIpc({ fileService });
   registerExportIpc({ exportService });
   registerSystemFontIpc({ systemFontService });
+  const masterBidDecompositionService = createMasterBidDecompositionService();
+  const fullFidelityBidAssemblyService = createFullFidelityBidAssemblyService({ app });
+  registerFullFidelityBidIpc({ masterBidDecompositionService, fullFidelityBidAssemblyService });
   registerPluginIpc(ipcMain, app, {
     agentService,
     taskService: null,

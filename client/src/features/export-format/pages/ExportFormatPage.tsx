@@ -1,6 +1,5 @@
-﻿import * as Dialog from '@radix-ui/react-dialog';
+import * as Dialog from '@radix-ui/react-dialog';
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react';
-import { trackPageView } from '../../../shared/analytics/analytics';
 import { AppSwitch, FloatingToolbar, ProgressBar, useToast } from '../../../shared/ui';
 import type { FloatingToolbarGroup } from '../../../shared/ui';
 import type {
@@ -258,6 +257,7 @@ function createDefaultExportFormat(): ExportFormatConfig {
   return {
     template_name: DEFAULT_EXPORT_FORMAT.template_name,
     page: { ...DEFAULT_EXPORT_FORMAT.page },
+    include_toc: DEFAULT_EXPORT_FORMAT.include_toc,
     heading_level1_page_break_before: DEFAULT_EXPORT_FORMAT.heading_level1_page_break_before,
     heading_border: { ...DEFAULT_EXPORT_FORMAT.heading_border, level_cell_colors: [...DEFAULT_EXPORT_FORMAT.heading_border.level_cell_colors] },
     headings: DEFAULT_EXPORT_FORMAT.headings.map((heading) => ({ ...heading })),
@@ -339,7 +339,6 @@ function ExportFormatPage({ mode = 'create', templateId = null, onBack }: Export
   }, []);
 
   useEffect(() => {
-    trackPageView(mode === 'edit' ? 'my-templates/edit' : 'new-template');
     let cancelled = false;
     (async () => {
       setLoaded(false);
@@ -1361,18 +1360,20 @@ export function TemplatePreview({ config, previewStyle }: { config: ExportFormat
     transform: `scale(${previewScale})`,
   }), [previewScale, previewStyle]);
 
-  const renderPageHeader = () => (
-    config.page.header_enabled && config.page.header_text.trim() ? (
-      <div className="export-template-page-header">
-        {config.page.header_text.trim()}
-      </div>
-    ) : null
-  );
+  const renderPageHeader = () => {
+    const headerText = String(config.page.header_text || '').replace(/\{project\}/g, '示例项目').trim();
+    return config.page.header_enabled && headerText ? (
+      <div className="export-template-page-header">{headerText}</div>
+    ) : null;
+  };
 
   const renderPageFooter = (pageIndex: number) => {
     if (!showFooterArea) return null;
     const pageNo = Math.max(1, Number(config.page.page_number_start) || 1) + pageIndex;
-    const pageNumberText = String(config.page.page_number_format || '第{page}页').replace('{page}', String(pageNo));
+    const pageTotal = pageIndex + 1;
+    const pageNumberText = String(config.page.page_number_format || '第{page}页')
+      .replace('{page}', String(pageNo))
+      .replace('{total}', String(pageTotal));
 
     return (
       <div className="export-template-page-footer" style={config.page.footer_enabled ? undefined : { textAlign: 'center' }}>

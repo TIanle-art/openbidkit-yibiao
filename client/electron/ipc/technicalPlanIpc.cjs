@@ -1,6 +1,7 @@
 const { ipcMain, shell } = require('electron');
+const { runTemplateFillTask, cancelTemplateFill } = require('../services/templateFillTask.cjs');
 
-function registerTechnicalPlanIpc({ technicalPlanStore, taskService }) {
+function registerTechnicalPlanIpc({ technicalPlanStore, taskService, aiService, knowledgeBaseService }) {
   ipcMain.handle('technical-plan:load-state', () => technicalPlanStore.loadTechnicalPlan());
   ipcMain.handle('technical-plan:import-tender-document', (_event, filePaths) => taskService.importTenderDocument(filePaths));
   ipcMain.handle('technical-plan:remove-tender-document', (_event, sourceId) => taskService.removeTenderDocument(sourceId));
@@ -21,6 +22,22 @@ function registerTechnicalPlanIpc({ technicalPlanStore, taskService }) {
   ipcMain.handle('technical-plan:save-global-facts', (_event, globalFacts) => technicalPlanStore.saveGlobalFacts(globalFacts));
   ipcMain.handle('technical-plan:save-content-generation-options', (_event, options) => technicalPlanStore.saveContentGenerationOptions(options));
   ipcMain.handle('technical-plan:save-chapter-content', (_event, payload) => technicalPlanStore.saveChapterContent(payload));
+  // 合规章节（响应函/资格声明/业绩表/财务表）必须能读到文档知识库里的真实企业材料，
+  // 否则只能靠模型编造，因此这里与正文生成一样传入 knowledgeBaseService。
+  // 同时逐章节回传进度并提供取消：这是一串串行 AI 请求，没有进度事件时界面就是「无响应」。
+  ipcMain.handle('technical-plan:run-template-fill', async (event) => {
+    const sendProgress = (progress) => {
+      if (event?.sender?.isDestroyed?.()) return;
+      event?.sender?.send?.('technical-plan:template-fill-progress', progress);
+    };
+    return runTemplateFillTask({
+      aiService,
+      workspaceStore: technicalPlanStore,
+      knowledgeBaseService,
+      onProgress: sendProgress,
+    });
+  });
+  ipcMain.handle('technical-plan:cancel-template-fill', () => cancelTemplateFill());
   ipcMain.handle('technical-plan:clear', () => taskService.resetTechnicalPlan());
   ipcMain.handle('technical-plan:open-bid-template', async () => {
     const filePath = technicalPlanStore.getBidTemplatePath?.();

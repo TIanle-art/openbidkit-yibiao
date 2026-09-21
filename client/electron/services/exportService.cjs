@@ -6,7 +6,7 @@ const cheerio = require('cheerio');
 const { imageSize } = require('image-size');
 const { compactLogError, createDeveloperLogger, textMetrics } = require('../utils/developerLog.cjs');
 const { getMermaidCacheEntry, saveMermaidCacheImage } = require('../utils/mermaidCache.cjs');
-const { getGeneratedImagesDir, getImportedImagesDir } = require('../utils/paths.cjs');
+const { getGeneratedImagesDir, getImageLibraryDir, getImportedImagesDir } = require('../utils/paths.cjs');
 const { REMOTE_IMAGE_RETRY_ATTEMPTS, REMOTE_IMAGE_RETRY_DELAY_MS } = require('../utils/remoteImageRetry.cjs');
 const { renderMarkdownHtml } = require('../utils/renderMarkdownHtml.cjs');
 const { getLocalImageRenderService } = require('./localImageRenderService.cjs');
@@ -32,6 +32,7 @@ const {
   TableCell,
   TableLayoutType,
   TableRow,
+  TableOfContents,
   TextRun,
   UnderlineType,
   VerticalAlignTable,
@@ -51,9 +52,9 @@ const DEFAULT_TABLE_STYLE = {
   border_color: '#dcdff6',
   cell_padding_pt: 6,
   full_width: true,
-  header_row: { font: '黑体', size: '小四', alignment: '居中对齐', text_color: '#243048', background_color: '#eef5ff' },
-  first_column: { font: '宋体', size: '小四', alignment: '左对齐', text_color: '#243048', background_color: '#ffffff' },
-  body_cell: { font: '宋体', size: '小四', alignment: '左对齐', text_color: '#243048', background_color: '#ffffff' },
+  header_row: { font: '黑体', size: '小五', alignment: '居中对齐', text_color: '#243048', background_color: '#eef5ff' },
+  first_column: { font: '宋体', size: '小五', alignment: '左对齐', text_color: '#243048', background_color: '#ffffff' },
+  body_cell: { font: '宋体', size: '小五', alignment: '左对齐', text_color: '#243048', background_color: '#ffffff' },
 };
 const DEFAULT_IMAGE_STYLE = {
   max_width_percent: 90,
@@ -189,11 +190,11 @@ function buildPendingContentModeParagraph(item) {
   if (String(item?.content || '').trim()) return null;
   let message = '';
   if (item?.content_mode === 'template-fill') {
-    message = '待模板填写：后续将从招标文件提取并填充内容。';
+    message = '待补充：本节需按招标文件模板填写，知识库/资料中暂未生成内容。';
   } else if (item?.content_mode === 'point-to-point') {
-    message = '待点对点应答表回填：将在正文完成并确定 Word 页码后处理。';
+    message = '待补充：本节为点对点应答表，需在正文完成并确定 Word 页码后回填。';
   } else if (item?.content_mode === 'other') {
-    message = `待处理：${String(item?.content_mode_note || '').trim() || '该小节采用其他特殊处理模式。'}`;
+    message = `待补充：${String(item?.content_mode_note || '').trim() || '本节内容知识库/资料中暂缺'}，请补充后重新生成。`;
   }
   return message
     ? paragraph([textRun(`[${message}]`, { color: '8A650B', italics: true })], { after: 120 })
@@ -239,6 +240,10 @@ function sanitizeFilename(value) {
 function formatExportTimestamp(date = new Date()) {
   const pad = (value) => String(value).padStart(2, '0');
   return `${date.getFullYear()}${pad(date.getMonth() + 1)}${pad(date.getDate())}_${pad(date.getHours())}${pad(date.getMinutes())}${pad(date.getSeconds())}`;
+}
+
+function formatChineseDate(date = new Date()) {
+  return `${date.getFullYear()} 年 ${date.getMonth() + 1} 月 ${date.getDate()} 日`;
 }
 
 function cleanText(value) {
@@ -377,6 +382,7 @@ function buildChapterContentRow(exportFormat, bodyChildren) {
   const columnSpan = frame.minHeadingLeftEnabled ? 2 : undefined;
 
   return new TableRow({
+    cantSplit: true,
     children: [new TableCell({
       children: body,
       margins: { top: 200, bottom: 220, left: 260, right: 260 },
@@ -395,6 +401,7 @@ function buildChapterLeafRow(exportFormat, titleParagraph, bodyChildren, level) 
   const fill = frame.fills[Math.max(0, Math.min(level - 1, 5))] || 'FFFFFF';
 
   return new TableRow({
+    cantSplit: true,
     children: [
       new TableCell({
         children: [titleParagraph],
@@ -437,23 +444,35 @@ function buildChapterFrameTable(exportFormat, rows) {
 }
 
 function createPageNumberRuns(format, runOptions) {
-  const parts = String(format || '第{page}页').split('{page}');
+  const parts = String(format || '第{page}页').split(/(\{page\}|\{total\})/);
   const runs = [];
 
-  if (parts[0]) {
-    runs.push(new TextRun({ ...runOptions, text: cleanText(parts[0]) }));
-  }
-  runs.push(new TextRun({ ...runOptions, children: [PageNumber.CURRENT] }));
-  if (parts[1]) {
-    runs.push(new TextRun({ ...runOptions, text: cleanText(parts[1]) }));
+  for (const part of parts) {
+    if (part === '{page}') {
+      runs.push(new TextRun({ ...runOptions, children: [PageNumber.CURRENT] }));
+    } else if (part === '{total}') {
+      runs.push(new TextRun({ ...runOptions, children: [PageNumber.TOTAL_PAGES] }));
+    } else if (part) {
+      runs.push(new TextRun({ ...runOptions, text: cleanText(part) }));
+    }
   }
 
   return runs;
 }
 
-function buildWordHeaders(pageSetup) {
+// 元信息完全无法解析时 resolveBidMetadata 会给出这个占位项目名。
+// 它只适合出现在封面，不适合塞进页眉变成「投标技术文件 投标文件」。
+const UNRESOLVED_PROJECT_NAME = '投标技术文件';
+
+function substituteProjectPlaceholder(template, projectName) {
+  const name = String(projectName || '').trim();
+  const usable = name === UNRESOLVED_PROJECT_NAME ? '' : name;
+  return String(template || '').replace(/\{project\}/g, usable);
+}
+
+function buildWordHeaders(pageSetup, projectName) {
   const enabled = pageSetup ? pageSetup.header_enabled === true : false;
-  const headerText = cleanText(pageSetup?.header_text || '').trim();
+  const headerText = cleanText(substituteProjectPlaceholder(pageSetup?.header_text, projectName)).trim();
   if (!enabled || !headerText) return undefined;
 
   const runOptions = {
@@ -461,22 +480,32 @@ function buildWordHeaders(pageSetup) {
     size: chineseSizeToHalfPt(pageSetup?.header_size || '小五'),
     color: normalizeDocxColor(pageSetup?.header_color || '#536176'),
   };
+  const borderColor = normalizeDocxColor(pageSetup?.header_color || '#B0B8C8', 'B0B8C8');
 
   return {
     default: new Header({
       children: [
         new Paragraph({
           alignment: alignmentToWordType(pageSetup?.header_alignment || '居中对齐'),
+          border: {
+            bottom: {
+              color: borderColor,
+              space: 4,
+              style: BorderStyle.SINGLE,
+              size: 6,
+            },
+          },
           children: [new TextRun({ ...runOptions, text: headerText })],
         }),
       ],
     }),
+    first: new Header({ children: [] }),
   };
 }
 
-function buildWordFooters(pageSetup) {
+function buildWordFooters(pageSetup, projectName) {
   const footerEnabled = isFooterEnabled(pageSetup);
-  const footerText = footerEnabled ? cleanText(pageSetup?.footer_text || '').trim() : '';
+  const footerText = footerEnabled ? cleanText(substituteProjectPlaceholder(pageSetup?.footer_text, projectName)).trim() : '';
   const pageNumberEnabled = isPageNumberEnabled(pageSetup);
   if (!footerText && !pageNumberEnabled) return undefined;
 
@@ -494,7 +523,7 @@ function buildWordFooters(pageSetup) {
     footerChildren.push(new TextRun({ ...runOptions, text: '    ' }));
   }
   if (pageNumberEnabled) {
-    footerChildren.push(...createPageNumberRuns(pageSetup?.page_number_format || '第{page}页', runOptions));
+    footerChildren.push(...createPageNumberRuns(pageSetup?.page_number_format || '第{page}页 共{total}页', runOptions));
   }
 
   return {
@@ -506,6 +535,7 @@ function buildWordFooters(pageSetup) {
         }),
       ],
     }),
+    first: new Footer({ children: [] }),
   };
 }
 
@@ -571,42 +601,58 @@ function tableCellRunMarks(style) {
 
 function tableCellParagraphOptions(style) {
   return {
-    after: 80,
+    before: 0,
+    after: 0,
     alignment: alignmentToWordType(style?.alignment || DEFAULT_TABLE_STYLE.body_cell.alignment),
   };
 }
 
-function tableColumnWidths(columnCount) {
+function getPageContentWidthTwips(context) {
+  const pageSetup = context?.exportFormat?.page || {};
+  const dims = PAPER_DIMENSIONS_MM[pageSetup.paper_size] || PAPER_DIMENSIONS_MM.a4;
+  const pageWidthMm = pageSetup.orientation === 'landscape' ? dims.height : dims.width;
+  const pageWidthTwips = mmToTwips(pageWidthMm);
+  const marginLeftTwips = cmToTwips(pageSetup.margin_left_cm ?? 2);
+  const marginRightTwips = cmToTwips(pageSetup.margin_right_cm ?? 2);
+  return Math.max(1000, pageWidthTwips - marginLeftTwips - marginRightTwips);
+}
+
+function tableColumnWidths(columnCount, context) {
+  const tableWidth = getPageContentWidthTwips(context);
   const safeCount = Math.max(1, columnCount || 1);
-  const base = Math.floor(DOCX_TABLE_WIDTH_TWIPS / safeCount);
+  const base = Math.floor(tableWidth / safeCount);
   const widths = Array.from({ length: safeCount }, () => base);
-  widths[widths.length - 1] += DOCX_TABLE_WIDTH_TWIPS - (base * safeCount);
+  widths[widths.length - 1] += tableWidth - (base * safeCount);
   return widths;
 }
 
-function tableCellWidth(columnSpan, totalColumns) {
+function tableCellWidth(columnSpan, totalColumns, context) {
+  const tableWidth = getPageContentWidthTwips(context);
   const safeTotal = Math.max(1, totalColumns || 1);
   const safeSpan = Math.max(1, columnSpan || 1);
-  return Math.round((DOCX_TABLE_WIDTH_TWIPS * safeSpan) / safeTotal);
+  return Math.round((tableWidth * safeSpan) / safeTotal);
 }
 
-function createTableCell({ children, context, isHeader = false, isFirstColumn = false, columnSpan = 1, totalColumns = 1 }) {
+function createTableCell({ children, context, isHeader = false, isFirstColumn = false, columnSpan = 1, widthTwips = undefined, totalColumns = 1 }) {
   const safeSpan = Math.max(1, columnSpan || 1);
   const table = getTableStyle(context);
   const cellStyle = getTableCellStyle(context, { isHeader, isFirstColumn });
   const fullWidth = table.full_width !== false;
+  const computedWidth = widthTwips || tableCellWidth(safeSpan, totalColumns, context);
   return new TableCell({
     children,
+    verticalAlign: VerticalAlignTable.CENTER,
     shading: { type: ShadingType.CLEAR, fill: normalizeDocxColor(cellStyle?.background_color, 'FFFFFF') },
     margins: tableCellMargins(context),
     columnSpan: safeSpan > 1 ? safeSpan : undefined,
-    width: fullWidth ? { size: tableCellWidth(safeSpan, totalColumns), type: WidthType.DXA } : undefined,
+    width: fullWidth ? { size: computedWidth, type: WidthType.DXA } : undefined,
   });
 }
 
-function createDocxTable(rows, columnCount, context) {
+function createDocxTable(rows, columnCount, context, customColumnWidths) {
   const table = getTableStyle(context);
   const fullWidth = table.full_width !== false;
+  const colWidths = customColumnWidths || tableColumnWidths(columnCount, context);
   const options = {
     rows,
     width: fullWidth ? { size: 100, type: WidthType.PERCENTAGE } : { size: 0, type: WidthType.AUTO },
@@ -614,7 +660,7 @@ function createDocxTable(rows, columnCount, context) {
     borders: tableBorders(context),
   };
   if (fullWidth) {
-    options.columnWidths = tableColumnWidths(columnCount);
+    options.columnWidths = colWidths;
   }
   return new Table(options);
 }
@@ -1083,6 +1129,7 @@ function resolveAssetImagePath(url) {
   const assetRoots = {
     'generated-images': getGeneratedImagesDir(app),
     'imported-images': getImportedImagesDir(app),
+    'image-library': getImageLibraryDir(app),
   };
   const rootDir = assetRoots[assetUrl.hostname];
   if (!rootDir) return null;
@@ -1133,7 +1180,15 @@ async function loadImage(source, context = {}) {
   }
 
   const fileUrlPrefix = 'file://';
-  const rawPath = url.startsWith(fileUrlPrefix) ? fileURLToPath(url) : url;
+  let rawPath = url;
+  if (url.startsWith(fileUrlPrefix)) {
+    try {
+      rawPath = fileURLToPath(url);
+    } catch {
+      rawPath = decodeURIComponent(url.slice(fileUrlPrefix.length));
+      if (/^\/[a-zA-Z]:/.test(rawPath)) rawPath = rawPath.slice(1);
+    }
+  }
   const resolvedPath = path.isAbsolute(rawPath)
     ? rawPath
     : path.resolve(context.baseDir || process.cwd(), rawPath);
@@ -1466,6 +1521,7 @@ async function htmlTableToDocx($, tableNode, context) {
   const rowDescriptors = $(tableNode).find('tr').toArray().map((rowNode) => {
     const cells = $(rowNode).children('th,td').toArray().map((cellNode) => ({
       node: cellNode,
+      text: $(cellNode).text().trim(),
       columnSpan: normalizeColumnSpan($(cellNode).attr('colspan')),
     }));
     return {
@@ -1475,34 +1531,69 @@ async function htmlTableToDocx($, tableNode, context) {
   }).filter((row) => row.cells.length);
   const maxColumns = Math.max(1, ...rowDescriptors.map((row) => row.columnCount));
 
+  // 基于各列文本长度计算更合理的列宽比例（使短内容如“序号”紧凑，长内容充分展开）
+  const tableWidthTwips = getPageContentWidthTwips(context);
+  const colCharLengths = Array.from({ length: maxColumns }, () => 0);
+  for (const row of rowDescriptors) {
+    let colIdx = 0;
+    for (const cell of row.cells) {
+      if (cell.columnSpan === 1 && colIdx < maxColumns) {
+        colCharLengths[colIdx] = Math.max(colCharLengths[colIdx], cell.text.length);
+      }
+      colIdx += cell.columnSpan;
+    }
+  }
+  const colWeights = colCharLengths.map((len) => Math.min(60, Math.max(8, len)));
+  const totalWeight = colWeights.reduce((sum, w) => sum + w, 0);
+  const columnWidths = colWeights.map((w) => Math.round((tableWidthTwips * w) / totalWeight));
+  const sumWidths = columnWidths.reduce((sum, w) => sum + w, 0);
+  columnWidths[columnWidths.length - 1] += (tableWidthTwips - sumWidths);
+
   for (const [rowIndex, row] of rowDescriptors.entries()) {
     const cells = [];
+    let currentColumn = 0;
     for (const [cellIndex, cell] of row.cells.entries()) {
       const cellNode = cell.node;
       const isHeader = rowIndex === 0 || htmlTagName(cellNode) === 'th';
       const isFirstColumn = !isHeader && cellIndex === 0;
       const cellStyle = getTableCellStyle(context, { isHeader, isFirstColumn });
       const remainingSpan = cellIndex === row.cells.length - 1 ? maxColumns - row.columnCount : 0;
+      const effectiveSpan = cell.columnSpan + Math.max(0, remainingSpan);
+
+      const cellWidthTwips = columnWidths.slice(currentColumn, currentColumn + effectiveSpan).reduce((a, b) => a + b, 0);
+      currentColumn += effectiveSpan;
+
+      const cellParaOpts = tableCellParagraphOptions(cellStyle);
+      const alignAttr = $(cellNode).attr('align');
+      if (alignAttr) {
+        cellParaOpts.alignment = alignmentToWordType(alignAttr);
+      }
+
       cells.push(createTableCell({
         children: [paragraph(
           await htmlInlineRuns($, $(cellNode).contents().toArray(), context, tableCellRunMarks(cellStyle)),
-          tableCellParagraphOptions(cellStyle),
+          cellParaOpts,
         )],
         context,
         isHeader,
         isFirstColumn,
-        columnSpan: cell.columnSpan + Math.max(0, remainingSpan),
+        columnSpan: effectiveSpan,
+        widthTwips: cellWidthTwips,
         totalColumns: maxColumns,
       }));
     }
-    rows.push(new TableRow({ children: cells }));
+    rows.push(new TableRow({
+      children: cells,
+      cantSplit: true,
+      tableHeader: rowIndex === 0 ? true : undefined,
+    }));
   }
 
   if (!rows.length) {
     return [];
   }
 
-  return [createDocxTable(rows, maxColumns, context)];
+  return [createDocxTable(rows, maxColumns, context, columnWidths)];
 }
 
 function buildListParagraphOptions(context, reference, level, itemIndex, totalItems, options = {}) {
@@ -1736,7 +1827,7 @@ async function htmlNodeToDocxBlocks($, node, context, options = {}) {
     return htmlNodesToDocxBlocks($, $(node).contents().toArray(), context, options);
   }
   if (['p', 'div', 'section', 'article', 'span', 'strong', 'b', 'em', 'i', 'del', 's', 'strike', 'a', 'code', 'label', 'small', 'sub', 'sup', 'mark'].includes(tag)) {
-    const isFigureCaption = /^图[:：]/.test($(node).text().trim());
+    const isFigureCaption = /^(?:图\s*\d*(?:[-—_·.]\d+)*[:：\s]|图[:：])/.test($(node).text().trim());
     if (isFigureCaption) {
       return [paragraph([textRun($(node).text().trim(), getCaptionRunMarks(context))], getCaptionParagraphOptions(context))];
     }
@@ -2235,8 +2326,189 @@ function buildHeadingParagraphStyles(exportFormat) {
   return styles;
 }
 
+function extractFactValue(facts, keywords) {
+  if (!facts) return '';
+  if (typeof facts === 'object' && !Array.isArray(facts)) {
+    for (const [k, v] of Object.entries(facts)) {
+      for (const kw of keywords) {
+        if (k.toLowerCase().includes(kw.toLowerCase()) || kw.toLowerCase().includes(k.toLowerCase())) {
+          if (v && typeof v === 'string') return v.trim();
+        }
+      }
+    }
+  }
+  const factArray = Array.isArray(facts) ? facts : [];
+  for (const group of factArray) {
+    const groupText = `${group?.title || ''} ${group?.name || ''} ${group?.content || ''}`;
+    const items = Array.isArray(group?.facts) ? group.facts : Array.isArray(group?.items) ? group.items : [];
+    for (const kw of keywords) {
+      const regex = new RegExp(`${kw}[：:\\s]+([^\\n\\r，,；;]+)`, 'i');
+      const match = regex.exec(groupText);
+      if (match && match[1]?.trim()) return match[1].trim();
+    }
+    for (const item of items) {
+      const itemText = typeof item === 'string' ? item : `${item?.label || item?.key || ''} ${item?.value || item?.content || ''}`;
+      for (const kw of keywords) {
+        if (itemText.includes(kw)) {
+          const regex = new RegExp(`${kw}[：:\\s]+([^\\n\\r，,；;]+)`, 'i');
+          const match = regex.exec(itemText);
+          if (match && match[1]?.trim()) return match[1].trim();
+          if (item?.value) return String(item.value).trim();
+        }
+      }
+    }
+  }
+  return '';
+}
+
+function parseBidAnalysisJsonTask(item) {
+  if (!item?.content) return {};
+  try {
+    return typeof item.content === 'string' ? JSON.parse(item.content) : (item.content || {});
+  } catch {
+    return {};
+  }
+}
+
+// 项目 / 招标 / 投标元信息的唯一解析入口。封面、页眉页脚、导出文件名都必须走这里，
+// 否则同一份导出文件里会出现「封面有项目名、页眉退化成『投标文件』」这种口径不一致。
+function resolveBidMetadata(payload) {
+  const globalFacts = payload.global_facts || payload.globalFacts || [];
+  const analysisTasks = payload.bid_analysis_tasks || payload.bidAnalysisTasks || {};
+  const projectInfoTask = parseBidAnalysisJsonTask(analysisTasks.projectInfo);
+  const partAInfoTask = parseBidAnalysisJsonTask(analysisTasks.partAInfo);
+
+  const buyerName = String(
+    payload.buyer_name
+    || payload.buyerName
+    || payload.owner_name
+    || (typeof globalFacts === 'object' && !Array.isArray(globalFacts) ? (globalFacts.buyer_name || globalFacts.buyerName || globalFacts.owner_name) : '')
+    || extractFactValue(globalFacts, ['招标人', '买方', '建设单位', '业主单位', '采购人', '招标单位', '业主'])
+    || (partAInfoTask.company_name && partAInfoTask.company_name !== '公司名称' && partAInfoTask.company_name !== '没有提及' ? partAInfoTask.company_name : '')
+    || ''
+  ).trim();
+
+  const projectName = String(
+    payload.project_name
+    || payload.projectName
+    || (typeof globalFacts === 'object' && !Array.isArray(globalFacts) ? (globalFacts.project_name || globalFacts.projectName) : '')
+    || extractFactValue(globalFacts, ['项目名称', '工程名称'])
+    || (projectInfoTask.project_name && projectInfoTask.project_name !== '项目名称' && projectInfoTask.project_name !== '没有提及' ? projectInfoTask.project_name : '')
+    || '投标技术文件'
+  ).trim();
+
+  const procurementNo = String(
+    payload.procurement_no
+    || payload.procurementNo
+    || (typeof globalFacts === 'object' && !Array.isArray(globalFacts) ? (globalFacts.procurement_no || globalFacts.procurementNo || globalFacts.tender_no) : '')
+    || extractFactValue(globalFacts, ['采购编号', '招标编号', '标书编号', '项目编号'])
+    || (projectInfoTask.project_number && projectInfoTask.project_number !== '项目编号' && projectInfoTask.project_number !== '没有提及' ? projectInfoTask.project_number : '')
+    || ''
+  ).trim();
+
+  const packageName = String(
+    payload.package_name
+    || payload.packageName
+    || (typeof globalFacts === 'object' && !Array.isArray(globalFacts) ? (globalFacts.package_name || globalFacts.packageName) : '')
+    || extractFactValue(globalFacts, ['标段名称', '标包名称', '分包名称', '标段（包）名称', '招标包', '标段', '标包'])
+    || ''
+  ).trim();
+
+  const bidderName = String(
+    payload.bidder_name
+    || payload.bidderName
+    || payload.applicant_name
+    || (typeof globalFacts === 'object' && !Array.isArray(globalFacts) ? (globalFacts.bidder_name || globalFacts.bidderName || globalFacts.applicant_name) : '')
+    || extractFactValue(globalFacts, ['投标人', '申请人', '卖方', '投标单位', '供应商'])
+    || ''
+  ).trim();
+
+  const representativeName = String(
+    payload.representative_name
+    || payload.representativeName
+    || (typeof globalFacts === 'object' && !Array.isArray(globalFacts) ? (globalFacts.representative_name || globalFacts.representativeName) : '')
+    || extractFactValue(globalFacts, ['法定代表人', '委托代理人', '代理人', '代表'])
+    || ''
+  ).trim();
+
+  const bidDate = String(
+    payload.bid_date
+    || payload.bidDate
+    || (typeof globalFacts === 'object' && !Array.isArray(globalFacts) ? (globalFacts.bid_date || globalFacts.bidDate) : '')
+    || extractFactValue(globalFacts, ['投标日期', '响应日期', '编制日期', '签署日期', '日期'])
+    || ''
+  ).trim();
+
+  return { buyerName, projectName, procurementNo, packageName, bidderName, representativeName, bidDate };
+}
+
+function buildBidDocumentCoverParagraphs(payload, context) {
+  const { buyerName, projectName, procurementNo, packageName, bidderName, representativeName, bidDate } = resolveBidMetadata(payload);
+
+  const isResponse = /响应/.test(projectName) || /响应/.test(payload.document_title || '');
+  const docTitle = payload.document_title || (isResponse ? '响 应 文 件' : '投 标 文 件');
+
+  const children = [];
+
+  // 1. 顶部招标人/业主名称
+  if (buyerName) {
+    children.push(paragraph([
+      textRun(buyerName, { bold: true, size: 32, font: '黑体' }),
+    ], { alignment: AlignmentType.CENTER, spacing: { before: 360, after: 240 } }));
+  } else {
+    children.push(paragraph([], { spacing: { before: 400 } }));
+  }
+
+  // 2. 项目工程全称
+  children.push(paragraph([
+    textRun(projectName, { bold: true, size: 36, font: '黑体' }),
+  ], { alignment: AlignmentType.CENTER, spacing: { before: 180, after: 400 } }));
+
+  // 3. 标书大标题（加粗特大号，居中排版）
+  children.push(paragraph([
+    textRun(docTitle, { bold: true, size: 56, font: '黑体' }),
+  ], { alignment: AlignmentType.CENTER, spacing: { before: 1200, after: 1200 } }));
+
+  // 4. 采购编号与标段包信息
+  if (procurementNo) {
+    children.push(paragraph([
+      textRun(`采购编号：${procurementNo}`, { bold: true, size: 28, font: '宋体' }),
+    ], { alignment: AlignmentType.CENTER, spacing: { after: 160 } }));
+  }
+  if (packageName && packageName !== projectName) {
+    children.push(paragraph([
+      textRun(`标段（包）名称：${packageName}`, { bold: true, size: 28, font: '宋体' }),
+    ], { alignment: AlignmentType.CENTER, spacing: { after: 240 } }));
+  }
+
+  // 5. 空段下推到底部落款签章区域
+  children.push(paragraph([], { spacing: { before: 3000 } }));
+
+  // 6. 申请人 / 投标人与签字盖章位
+  const applicantDisplay = bidderName ? `申请人：${bidderName}  （盖单位章）` : '申请人：____________________  （盖单位章）';
+  children.push(paragraph([
+    textRun(applicantDisplay, { size: 28, font: '宋体' }),
+  ], { alignment: AlignmentType.CENTER, spacing: { after: 180 } }));
+
+  const repDisplay = representativeName
+    ? `法定代表人或其委托代理人：${representativeName}  （签字）`
+    : '法定代表人或其委托代理人：                （签字）';
+  children.push(paragraph([
+    textRun(repDisplay, { size: 28, font: '宋体' }),
+  ], { alignment: AlignmentType.CENTER, spacing: { after: 240 } }));
+
+  children.push(paragraph([
+    textRun(`日期：${bidDate || formatChineseDate()}`, { size: 28, font: '宋体' }),
+  ], { alignment: AlignmentType.CENTER, spacing: { after: 120 } }));
+
+  // 7. 分页符独立成页
+  children.push(new Paragraph({ children: [new PageBreak()], spacing: { after: 0 } }));
+
+  return children;
+}
+
 async function buildDocxResult(payload, options = {}) {
-  const exportFormat = (payload && payload.export_format) || null;
+  const exportFormat = (payload && (payload.export_format || payload.export_format_config)) || null;
   const stats = countOutlineStats(payload.outline || []);
   const context = {
     baseDir: payload.base_dir || payload.baseDir,
@@ -2290,13 +2562,23 @@ async function buildDocxResult(payload, options = {}) {
   if (feasibility?.includeCover) {
     children.push(...buildFeasibilityCoverParagraphs(payload, feasibility));
   } else {
-    children.push(
-      paragraph([textRun('内容由 AI 生成', { italics: true, size: 18 })], { alignment: AlignmentType.CENTER, after: 120 }),
-      paragraph([textRun(payload.project_name || (feasibility ? '可行性研究报告' : '投标技术文件'), { bold: true, size: 34 })], { alignment: AlignmentType.CENTER, after: 300 }),
-    );
+    children.push(...buildBidDocumentCoverParagraphs(payload, context));
   }
   if (feasibility?.includeNotes) {
     children.push(...buildFeasibilityNotesParagraphs(payload, feasibility));
+  }
+
+  // 目录页（仅非可研导出且开启 include_toc 时插入；Word 中更新目录域即可填充）
+  if (!feasibility && exportFormat && exportFormat.include_toc !== false) {
+    children.push(
+      new Paragraph({
+        children: [new TextRun({ text: '目  录', bold: true, size: 32, font: '黑体' })],
+        alignment: AlignmentType.CENTER,
+        spacing: { before: 240, after: 360 },
+      }),
+      new TableOfContents('目录', { hyperlink: true, headingStyleRange: '1-3' }),
+      new Paragraph({ children: [new PageBreak()], spacing: { after: 0 } }),
+    );
   }
 
   reportProgress(context, 10, stats.mermaidCount
@@ -2337,8 +2619,11 @@ async function buildDocxResult(payload, options = {}) {
   const sectionChildren = [...children];
   const pageNumberEnabled = isPageNumberEnabled(pageSetup);
   const pageNumberStart = Math.max(1, Math.floor(Number(pageSetup ? pageSetup.page_number_start : 1) || 1));
-  const headers = buildWordHeaders(pageSetup);
-  const footers = buildWordFooters(pageSetup);
+  // 页眉页脚与封面共用同一份元信息解析（含 Step02 解析结果与全局事实回退），
+  // 否则 payload.project_name 为空时页眉会退化成只有「投标文件」。
+  const bidMetadata = resolveBidMetadata(payload);
+  const headers = buildWordHeaders(pageSetup, bidMetadata.projectName);
+  const footers = buildWordFooters(pageSetup, bidMetadata.projectName);
 
   const numbering = createNumberingConfig(context);
   const headingStyles = buildHeadingParagraphStyles(exportFormat);
@@ -2348,7 +2633,7 @@ async function buildDocxResult(payload, options = {}) {
       ...pageSizeConfig,
       ...(pageNumberEnabled ? { pageNumbers: { start: pageNumberStart } } : {}),
     },
-    ...(firstPageDifferent ? { titlePage: true } : {}),
+    titlePage: true,
   };
   const doc = new Document({
     ...(numbering ? { numbering } : {}),
@@ -2392,18 +2677,24 @@ function createExportService({ configStore } = {}) {
   return {
     async exportWord(payload = {}, onProgress) {
       const stats = countOutlineStats(Array.isArray(payload.outline) ? payload.outline : []);
+      // 文件名也走元信息解析链，否则目录未回填项目名时导出件会变成「标书文档_时间.docx」。
+      const resolvedProjectName = resolveBidMetadata(payload).projectName;
+      // 可研导出在完全解析不到项目名时保留原有兜底文件名。
+      const exportProjectName = resolvedProjectName === UNRESOLVED_PROJECT_NAME && payload.feasibility_options
+        ? '可行性研究报告'
+        : resolvedProjectName;
       const developerLogger = createDeveloperLogger({
         app,
         config: loadDeveloperConfig(configStore),
         moduleName: 'export',
         name: 'word-export',
         meta: {
-          project_name: sanitizeFilename(payload.project_name || '投标技术文件'),
+          project_name: sanitizeFilename(exportProjectName),
           stats,
         },
       });
       developerLogger.write('export.word.started', {
-        project_name: sanitizeFilename(payload.project_name || '投标技术文件'),
+        project_name: sanitizeFilename(exportProjectName),
         stats,
         content_metrics: countOutlineContentMetrics(Array.isArray(payload.outline) ? payload.outline : []),
       });
@@ -2417,7 +2708,7 @@ function createExportService({ configStore } = {}) {
       reportProgress(progressContext, 2, stats.mermaidCount
         ? `检测到 ${stats.mermaidCount} 张 Mermaid 图，导出时会转换为 Word 图片。`
         : '正在准备 Word 导出。');
-      const defaultFilename = `${sanitizeFilename(payload.project_name || (payload.feasibility_options ? '可行性研究报告' : '标书文档'))}_${formatExportTimestamp()}.docx`;
+      const defaultFilename = `${sanitizeFilename(exportProjectName)}_${formatExportTimestamp()}.docx`;
       const defaultDir = app?.getPath ? app.getPath('downloads') : process.env.USERPROFILE || process.cwd();
       const result = await dialog.showSaveDialog({
         title: '导出 Word 文档',

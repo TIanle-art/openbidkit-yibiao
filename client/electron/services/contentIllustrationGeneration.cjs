@@ -451,11 +451,12 @@ function buildGeneratedIllustrationMarkdown(planItem) {
   const generation = planItem.generation || {};
   const caption = singleLine(planItem.title);
   if (!caption) throw new Error(`图片计划缺少 title：${planItem.item_id || 'unknown'}`);
+  const formattedCaption = /^(?:图\s*\d*(?:[-—_·.]\d+)*[:：\s]|图[:：])/.test(caption) ? caption : `图：${caption}`;
   let body = '';
   if (planItem.kind === 'mermaid' && generation.code) {
-    body = `\`\`\`mermaid\n${normalizeMermaidCode(generation.code)}\n\`\`\`\n\n*图：${caption}*`;
+    body = `\`\`\`mermaid\n${normalizeMermaidCode(generation.code)}\n\`\`\`\n\n*${formattedCaption}*`;
   } else if (generation.asset_url) {
-    body = `![${caption}](${generation.asset_url})\n\n*图：${caption}*`;
+    body = `![${caption}](${generation.asset_url})\n\n*${formattedCaption}*`;
   }
   if (!body) return '';
   return `<!-- yibiao-illustration:start id="${planItem.item_id}" -->\n${body}\n<!-- yibiao-illustration:end -->`;

@@ -25,6 +25,7 @@ const initialState: TechnicalPlanState = {
   outlineWordControlOptions: { ...DEFAULT_OUTLINE_WORD_CONTROL_OPTIONS },
   outlineWordControlSnapshot: undefined,
   referenceKnowledgeDocumentIds: [],
+  referencePastBidTemplateId: undefined,
   bidSectionExtractionTask: undefined,
   bidAnalysisTask: undefined,
   outlineGenerationTask: undefined,

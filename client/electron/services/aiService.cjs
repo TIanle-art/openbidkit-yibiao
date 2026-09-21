@@ -32,8 +32,6 @@ const JINLONG_DEPRECATED_MODEL_MAP = {
   'gpt-5.6-luna': 'gpt-5.6-terra',
 };
 const IMAGE_MODEL_TEST_TIMEOUT_MESSAGE = '生图模型测试超时，请检查 Base URL、API Key 或模型名称';
-const ANALYTICS_ENDPOINT = 'https://analytics.agnet.top/track';
-const ANALYTICS_PROJECT_NAME = 'yibiao-client';
 const MODEL_INFO_ENDPOINT = 'https://analytics.agnet.top/model-info';
 const OPENAI_IMAGE_PROVIDER_META = {
   jinlong: {
@@ -117,24 +115,6 @@ function onTextTokenStatsChanged(listener) {
   return textTokenStatsStore.onTextTokenStatsChanged(listener);
 }
 
-function normalizeAnalyticsEndpointHost(baseUrl) {
-  const rawValue = String(baseUrl || '').trim();
-  if (!rawValue) {
-    return '';
-  }
-
-  const candidates = rawValue.includes('://') ? [rawValue] : [`https://${rawValue}`];
-  for (const candidate of candidates) {
-    try {
-      return new URL(candidate).hostname.toLowerCase();
-    } catch {
-      // 尝试下一个候选格式。
-    }
-  }
-
-  return '';
-}
-
 function extractOpenAIUsage(responseData) {
   return normalizeTokenUsage(responseData?.usage);
 }
@@ -160,6 +140,53 @@ function normalizeOpenAICompatibleImageSize(imageConfig, requestSize) {
   const requested = String(requestSize || '').trim();
   const configured = String(imageConfig?.image_size || '').trim();
   return requested || configured || '1024x1024';
+}
+
+const AGNES_IMAGE_2_0_SIZES = new Set(['1024x768', '1024x1024', '768x1024']);
+const AGNES_IMAGE_2_1_SIZES = new Set(['1K', '2K', '3K', '4K']);
+const AGNES_IMAGE_RATIOS = new Set(['1:1', '3:4', '4:3', '16:9', '9:16', '2:3', '3:2', '21:9']);
+
+// 按服务商协议构造 OpenAI 兼容生图请求。
+function createOpenAICompatibleImageRequestBody(provider, imageConfig, prompt, requestSize) {
+  const requestMode = normalizeImageRequestMode(imageConfig);
+  const model = String(imageConfig?.model_name || '').trim();
+  const size = normalizeOpenAICompatibleImageSize(imageConfig, requestSize);
+
+  if (provider !== 'agnes') {
+    return {
+      model,
+      prompt,
+      size,
+      response_format: 'url',
+      ...(requestMode === 'stream' ? { stream: true } : {}),
+    };
+  }
+
+  if (requestMode === 'stream') {
+    throw new Error('Agnes AI 生图仅支持普通请求，请在设置中将请求方式改为普通请求');
+  }
+  if (size === 'auto') {
+    throw new Error('Agnes AI 生图不支持自动尺寸，请在设置中选择具体图片尺寸');
+  }
+
+  if (model === 'agnes-image-2.0-flash' && !AGNES_IMAGE_2_0_SIZES.has(size)) {
+    throw new Error('Agnes Image 2.0 Flash 仅支持 1024x768、1024x1024 或 768x1024');
+  }
+  if (model === 'agnes-image-2.1-flash' && !AGNES_IMAGE_2_1_SIZES.has(size)) {
+    throw new Error('Agnes Image 2.1 Flash 请使用 1K、2K、3K 或 4K 图片尺寸');
+  }
+
+  const body = {
+    model,
+    prompt,
+    size,
+    extra_body: { response_format: 'url' },
+  };
+  if (model === 'agnes-image-2.1-flash') {
+    const ratio = String(imageConfig?.image_ratio || '1:1').trim();
+    body.ratio = AGNES_IMAGE_RATIOS.has(ratio) ? ratio : '1:1';
+  }
+  return body;
 }
 
 function normalizeGoogleImageSize(imageConfig) {
@@ -209,50 +236,6 @@ function createHeaders(apiKey) {
     'Content-Type': 'application/json',
     Authorization: `Bearer ${apiKey}`,
   };
-}
-
-function trackAiRequest(app, config, payload) {
-  void Promise.resolve()
-    .then(() => {
-      const imageConfig = config.image_model || {};
-      const requestType = payload.ai_request_type || '';
-      const tokenUsage = normalizeTokenUsage(payload.usage);
-      const modelProvider = requestType === 'image'
-        ? imageConfig.provider || ''
-        : config.text_model_provider || '';
-      const modelBaseUrl = requestType === 'image'
-        ? imageConfig.base_url || ''
-        : config.base_url || '';
-      const modelEndpointHost = normalizeAnalyticsEndpointHost(modelBaseUrl);
-      const modelName = requestType === 'image'
-        ? imageConfig.model_name || ''
-        : config.model_name || '';
-      const body = {
-        projectName: ANALYTICS_PROJECT_NAME,
-        event: 'ai_request',
-        version: typeof app?.getVersion === 'function' ? app.getVersion() : '',
-        platform: process.platform,
-        arch: process.arch,
-        client_id: config.analytics_client_id || '',
-        client_created_at: config.analytics_created_at || '',
-        ai_request_type: requestType,
-        ai_model_provider: modelProvider,
-        ai_model_base_url: modelEndpointHost,
-        ai_model_name: modelName,
-        prompt_tokens: tokenUsage.prompt_tokens,
-        completion_tokens: tokenUsage.completion_tokens,
-        total_tokens: tokenUsage.total_tokens,
-        text_model_name: requestType === 'text' ? modelName : '',
-        image_model_name: requestType === 'image' ? modelName : '',
-      };
-
-      return fetch(ANALYTICS_ENDPOINT, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-      });
-    })
-    .catch(() => undefined);
 }
 
 function imageExtensionFromMime(mimeType) {
@@ -496,7 +479,12 @@ const jsonEscapeChars = new Set(['"', '\\', '/', 'b', 'f', 'n', 'r', 't']);
 const markdownEscapeChars = new Set(['.', '(', ')', '[', ']', '{', '}', '#', '*', '+', '-', '_', '!', '<', '>', '|', '`']);
 
 function repairInvalidJsonStringEscapes(content) {
-  const text = String(content || '');
+  let text = String(content || '');
+  // 清理控制字符（保留 \t \n \r）
+  text = text.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, '');
+  // 剥离末尾多余的逗号（如 {"a": 1,} 或 [1, 2,]）
+  text = text.replace(/,\s*([}\]])/g, '$1');
+
   let output = '';
   let inString = false;
 
@@ -514,6 +502,21 @@ function repairInvalidJsonStringEscapes(content) {
     if (char === '"') {
       output += char;
       inString = false;
+      continue;
+    }
+
+    if (char === '\n') {
+      output += '\\n';
+      continue;
+    }
+
+    if (char === '\r') {
+      output += '\\r';
+      continue;
+    }
+
+    if (char === '\t') {
+      output += '\\t';
       continue;
     }
 
@@ -587,6 +590,21 @@ function parseJsonContent(content) {
       return JSON.parse(candidate);
     } catch (error) {
       lastError = error;
+    }
+  }
+
+  // 兜底：尝试对提取到的候选进行更强力的清理（剥离前后非JSON字符、尾部逗号等）
+  for (const candidate of uniqueCandidates) {
+    try {
+      const aggressiveCleaned = candidate
+        .replace(/^[^{[]*/, '')
+        .replace(/[^}\]]*$/, '')
+        .replace(/,\s*([}\]])/g, '$1');
+      if (aggressiveCleaned && aggressiveCleaned !== candidate) {
+        return JSON.parse(aggressiveCleaned);
+      }
+    } catch (e) {
+      // ignore
     }
   }
 
@@ -768,6 +786,78 @@ function createChatRequestBody(config, request, options = {}) {
   }
 
   return body;
+}
+
+function redactInlineImagesForLog(value) {
+  if (Array.isArray(value)) return value.map(redactInlineImagesForLog);
+  if (!value || typeof value !== 'object') {
+    if (typeof value === 'string' && /^data:image\/[^;]+;base64,/i.test(value)) {
+      return '[inline image omitted]';
+    }
+    return value;
+  }
+  return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, redactInlineImagesForLog(item)]));
+}
+
+function mimeForVisionFile(filePath) {
+  const ext = path.extname(String(filePath || '')).toLowerCase();
+  return ({
+    '.jpg': 'image/jpeg',
+    '.jpeg': 'image/jpeg',
+    '.png': 'image/png',
+    '.gif': 'image/gif',
+    '.webp': 'image/webp',
+    '.bmp': 'image/bmp',
+    '.svg': 'image/svg+xml',
+  })[ext] || 'application/octet-stream';
+}
+
+function normalizeImageDescriptionResult(payload) {
+  const source = payload && typeof payload === 'object' && !Array.isArray(payload) ? payload : {};
+  const name = String(source.name || '').replace(/\s+/g, ' ').trim().slice(0, 30);
+  const description = String(source.description || '').replace(/\s+/g, ' ').trim().slice(0, 500);
+  const rawTags = Array.isArray(source.tags) ? source.tags : String(source.tags || '').split(/[,，;；、\s]+/);
+  const tags = [...new Set(rawTags.map((item) => String(item || '').replace(/\s+/g, '').trim()).filter(Boolean))].slice(0, 8);
+  if (!name || !description) throw new Error('图片识别结果缺少名称或内容描述');
+  return { name, description, tags: tags.join('，') };
+}
+
+async function describeImageWithConfig(app, config, filePath, context = {}) {
+  const sourcePath = String(filePath || '');
+  if (!sourcePath || !fs.existsSync(sourcePath)) throw new Error('待识别图片不存在');
+  const buffer = fs.readFileSync(sourcePath);
+  if (!buffer.length) throw new Error('待识别图片为空');
+  const mime = mimeForVisionFile(sourcePath);
+  if (!mime.startsWith('image/')) throw new Error('当前文件不是支持识别的图片格式');
+  const sourceContext = String(context.sourceContext || '').trim().slice(0, 1000);
+  const originalName = String(context.originalName || path.basename(sourcePath)).trim();
+  return collectJsonResponseWithConfig(app, config, {
+    messages: [
+      {
+        role: 'system',
+        content: '你是投标资料图片标注助手。只描述图片中真实可见的对象、文字、结构、场景和用途，不得根据文件名臆测。输出严格 JSON。',
+      },
+      {
+        role: 'user',
+        content: [
+          {
+            type: 'text',
+            text: `请为这张图片生成知识库元数据。原始名称：${originalName || '未知'}${sourceContext ? `\n来源上下文：${sourceContext}` : ''}\n要求：name 为 4-20 个字的中文语义名称；description 客观说明图片内容及可用场景；tags 为最多 8 个短标签。返回 {"name":"...","description":"...","tags":["..."]}。`,
+          },
+          {
+            type: 'image_url',
+            image_url: { url: `data:${mime};base64,${buffer.toString('base64')}`, detail: 'low' },
+          },
+        ],
+      },
+    ],
+    response_format: { type: 'json_object' },
+    progressLabel: '图片语义标注',
+    failureMessage: '模型未返回有效的图片名称和描述',
+    max_retries: 0,
+    normalizer: normalizeImageDescriptionResult,
+    logTitle: '图片知识库-语义标注',
+  });
 }
 
 // 保留 Pi 工具调用协议字段，并统一应用当前文本模型配置。
@@ -1242,7 +1332,7 @@ async function chatWithConfig(app, config, request) {
   let requestBody = createChatRequestBody(config, request, { stream: requestMode === 'stream' });
   let responseData = null;
   let errorMessage = '';
-  let analyticsTracked = false;
+  let tokenStatsRecorded = false;
   const timeoutMs = normalizeRequestTimeoutMs(request);
 
   try {
@@ -1252,7 +1342,7 @@ async function chatWithConfig(app, config, request) {
       type: 'chat-pending',
       request_mode: requestMode,
       url: `${trimBaseUrl(config.base_url)}/chat/completions`,
-      request: requestBody,
+      request: redactInlineImagesForLog(requestBody),
       status: 'pending',
       created_at: new Date().toISOString(),
     });
@@ -1272,8 +1362,7 @@ async function chatWithConfig(app, config, request) {
 
     responseData = result.responseData;
     recordTextTokenStats(config, result.usage);
-    trackAiRequest(app, config, { ai_request_type: 'text', usage: result.usage });
-    analyticsTracked = true;
+    tokenStatsRecorded = true;
     const content = result.content || '';
     writeAiLog(app, config, {
       request_id: requestId,
@@ -1281,7 +1370,7 @@ async function chatWithConfig(app, config, request) {
       type: 'chat',
       request_mode: requestMode,
       url: `${trimBaseUrl(config.base_url)}/chat/completions`,
-      request: requestBody,
+      request: redactInlineImagesForLog(requestBody),
       response: responseData,
       content,
       created_at: new Date().toISOString(),
@@ -1291,10 +1380,9 @@ async function chatWithConfig(app, config, request) {
     errorMessage = error.name === 'AbortError'
       ? request.timeout_message || `AI 请求超时（${timeoutMs / 1000} 秒）`
       : error.message;
-    if (!analyticsTracked) {
+    if (!tokenStatsRecorded) {
       recordTextTokenStats(config, null);
-      trackAiRequest(app, config, { ai_request_type: 'text' });
-      analyticsTracked = true;
+      tokenStatsRecorded = true;
     }
     writeAiLog(app, config, {
       request_id: requestId,
@@ -1302,7 +1390,7 @@ async function chatWithConfig(app, config, request) {
       type: 'chat-error',
       request_mode: requestMode,
       url: `${trimBaseUrl(config.base_url)}/chat/completions`,
-      request: requestBody,
+      request: redactInlineImagesForLog(requestBody),
       response: getAiErrorLogResponse(error, responseData),
       error: getAiErrorLogError(error, errorMessage),
       created_at: new Date().toISOString(),
@@ -1338,7 +1426,7 @@ async function runAgentChatCompletionWithConfig(app, config, request) {
   const requestMode = requestBody.stream ? 'stream' : 'normal';
   const logTitle = resolveAiLogTitle(request, 'Pi Agent');
   let responseData = null;
-  let analyticsTracked = false;
+  let tokenStatsRecorded = false;
 
   try {
     writeAiLog(app, config, {
@@ -1361,8 +1449,7 @@ async function runAgentChatCompletionWithConfig(app, config, request) {
     });
     responseData = result?.responseData ?? null;
     recordTextTokenStats(config, result?.usage);
-    trackAiRequest(app, config, { ai_request_type: 'text', usage: result?.usage });
-    analyticsTracked = true;
+    tokenStatsRecorded = true;
     writeAiLog(app, config, {
       request_id: requestId,
       log_title: logTitle,
@@ -1376,9 +1463,8 @@ async function runAgentChatCompletionWithConfig(app, config, request) {
     });
     return result;
   } catch (error) {
-    if (!analyticsTracked) {
+    if (!tokenStatsRecorded) {
       recordTextTokenStats(config, null);
-      trackAiRequest(app, config, { ai_request_type: 'text' });
     }
     writeAiLog(app, config, {
       request_id: requestId,
@@ -1399,7 +1485,7 @@ async function testOpenAICompatibleImageModel(app, config, provider) {
   const imageConfig = config.image_model || {};
   const meta = OPENAI_IMAGE_PROVIDER_META[provider] || OPENAI_IMAGE_PROVIDER_META.volcengine;
   let responseData = null;
-  let analyticsTracked = false;
+  let tokenStatsRecorded = false;
 
   if (!imageConfig.api_key) {
     throw new Error(`请先填写${meta.label} API Key`);
@@ -1413,13 +1499,11 @@ async function testOpenAICompatibleImageModel(app, config, provider) {
   const requestMode = normalizeImageRequestMode(imageConfig);
   const requestId = createRequestId();
   const logTitle = `AI生图测试-${meta.label}`;
-  const requestBody = {
-    model: imageConfig.model_name,
-    prompt: '大字报，内容是“易标AI老好了”',
-    size: normalizeOpenAICompatibleImageSize(imageConfig),
-    response_format: 'url',
-    ...(requestMode === 'stream' ? { stream: true } : {}),
-  };
+  const requestBody = createOpenAICompatibleImageRequestBody(
+    provider,
+    imageConfig,
+    '大字报，内容是“易标AI老好了”',
+  );
 
   try {
     writeAiLog(app, config, {
@@ -1456,8 +1540,7 @@ async function testOpenAICompatibleImageModel(app, config, provider) {
       throw error;
     }
 
-    trackAiRequest(app, config, { ai_request_type: 'image', usage: extractOpenAIUsage(responseData) });
-    analyticsTracked = true;
+    tokenStatsRecorded = true;
     const firstImage = responseData.data?.[0] || {};
     const imageUrl = firstImage.url || '';
     const imageData = firstImage.b64_json || '';
@@ -1490,9 +1573,6 @@ async function testOpenAICompatibleImageModel(app, config, provider) {
       mime_type: 'image/png',
     };
   } catch (error) {
-    if (!analyticsTracked) {
-      trackAiRequest(app, config, { ai_request_type: 'image' });
-    }
     const errorMessage = error?.name === 'AbortError' ? IMAGE_MODEL_TEST_TIMEOUT_MESSAGE : error?.message || '生图模型测试失败';
     writeAiLog(app, config, {
       request_id: requestId,
@@ -1513,7 +1593,7 @@ async function testOpenAICompatibleImageModel(app, config, provider) {
 
 async function testGoogleImageModel(app, config) {
   const imageConfig = config.image_model || {};
-  let analyticsTracked = false;
+  let tokenStatsRecorded = false;
 
   if (!imageConfig.api_key) {
     throw new Error('请先填写 Google AI Studio API Key');
@@ -1554,8 +1634,7 @@ async function testGoogleImageModel(app, config) {
       ),
       AI_REQUEST_TIMEOUT_MS,
     ));
-    trackAiRequest(app, config, { ai_request_type: 'image', usage: extractGoogleUsage(responseData) });
-    analyticsTracked = true;
+    tokenStatsRecorded = true;
     const text = getGoogleText(responseData);
     const inlineData = getGoogleImageInlineData(responseData);
 
@@ -1585,9 +1664,6 @@ async function testGoogleImageModel(app, config) {
       mime_type: inlineData?.mimeType || inlineData?.mime_type || 'image/png',
     };
   } catch (error) {
-    if (!analyticsTracked) {
-      trackAiRequest(app, config, { ai_request_type: 'image' });
-    }
     const errorMessage = error?.name === 'AbortError' ? IMAGE_MODEL_TEST_TIMEOUT_MESSAGE : error?.message || '生图模型测试失败';
     writeAiLog(app, config, {
       request_id: requestId,
@@ -1612,16 +1688,15 @@ async function generateOpenAICompatibleImage(app, config, request, provider) {
   const requestId = createRequestId();
   const logTitle = resolveAiLogTitle(request, request.title ? `AI生图-${request.title}` : 'AI生图');
   const requestMode = normalizeImageRequestMode(imageConfig);
-  const requestBody = {
-    model: imageConfig.model_name,
-    prompt: normalizeImagePrompt(request),
-    size: normalizeOpenAICompatibleImageSize(imageConfig, request.size),
-    response_format: 'url',
-    ...(requestMode === 'stream' ? { stream: true } : {}),
-  };
+  const requestBody = createOpenAICompatibleImageRequestBody(
+    provider,
+    imageConfig,
+    normalizeImagePrompt(request),
+    request.size,
+  );
   const baseUrl = requireBaseUrl(imageConfig.base_url, `${meta.label} Base URL 缺失，请重新选择服务商后保存配置`);
   let responseData = null;
-  let analyticsTracked = false;
+  let tokenStatsRecorded = false;
 
   try {
     writeAiLog(app, config, {
@@ -1646,8 +1721,7 @@ async function generateOpenAICompatibleImage(app, config, request, provider) {
       AI_REQUEST_TIMEOUT_MS,
       request.signal,
     ));
-    trackAiRequest(app, config, { ai_request_type: 'image', usage: extractOpenAIUsage(responseData) });
-    analyticsTracked = true;
+    tokenStatsRecorded = true;
 
     const item = responseData.data?.[0] || {};
     const image = await runWithOperationTimeout(
@@ -1674,9 +1748,8 @@ async function generateOpenAICompatibleImage(app, config, request, provider) {
     });
     return { success: true, title: request.title || '', ...saved };
   } catch (error) {
-    if (!analyticsTracked) {
-      trackAiRequest(app, config, { ai_request_type: 'image' });
-      analyticsTracked = true;
+    if (!tokenStatsRecorded) {
+      tokenStatsRecorded = true;
     }
     writeAiLog(app, config, {
       request_id: requestId,
@@ -1704,7 +1777,7 @@ async function generateGoogleImage(app, config, request) {
   const baseUrl = requireBaseUrl(imageConfig.base_url, 'Google AI Studio Base URL 缺失，请重新选择服务商后保存配置');
   const url = createGoogleImageUrl(baseUrl, imageConfig.model_name, requestMode);
   let responseData = null;
-  let analyticsTracked = false;
+  let tokenStatsRecorded = false;
 
   try {
     writeAiLog(app, config, {
@@ -1730,8 +1803,7 @@ async function generateGoogleImage(app, config, request) {
       AI_REQUEST_TIMEOUT_MS,
       request.signal,
     ));
-    trackAiRequest(app, config, { ai_request_type: 'image', usage: extractGoogleUsage(responseData) });
-    analyticsTracked = true;
+    tokenStatsRecorded = true;
     const inlineData = getGoogleImageInlineData(responseData);
 
     if (!inlineData?.data) {
@@ -1755,9 +1827,8 @@ async function generateGoogleImage(app, config, request) {
     });
     return { success: true, title: request.title || '', ...saved };
   } catch (error) {
-    if (!analyticsTracked) {
-      trackAiRequest(app, config, { ai_request_type: 'image' });
-      analyticsTracked = true;
+    if (!tokenStatsRecorded) {
+      tokenStatsRecorded = true;
     }
     writeAiLog(app, config, {
       request_id: requestId,
@@ -2128,7 +2199,7 @@ async function runComfyUIImageGeneration(app, config, request, options = {}) {
   const logTitle = resolveAiLogTitle(request, request.title ? `AI生图-${request.title}` : 'AI生图');
   const logExtra = options.logExtra || {};
   let responseData = null;
-  let analyticsTracked = false;
+  let tokenStatsRecorded = false;
 
   try {
     const template = await resolveComfyUIWorkflowTemplate(baseUrl, imageConfig, { signal: request.signal });
@@ -2160,8 +2231,7 @@ async function runComfyUIImageGeneration(app, config, request, options = {}) {
       request.signal,
     );
     responseData = { prompt_id: promptId, status: entry?.status || null, images };
-    trackAiRequest(app, config, { ai_request_type: 'image' });
-    analyticsTracked = true;
+    tokenStatsRecorded = true;
 
     const image = await runWithOperationTimeout(
       (signal) => fetchComfyUIImage(baseUrl, images[0], { signal }),
@@ -2198,9 +2268,6 @@ async function runComfyUIImageGeneration(app, config, request, options = {}) {
     });
     return { success: true, title: request.title || '', ...saved };
   } catch (error) {
-    if (!analyticsTracked) {
-      trackAiRequest(app, config, { ai_request_type: 'image' });
-    }
     const errorMessage = options.isTest && error?.name === 'AbortError' ? IMAGE_MODEL_TEST_TIMEOUT_MESSAGE : error?.message || 'ComfyUI 生图失败';
     writeAiLog(app, config, {
       request_id: requestId,
@@ -2450,6 +2517,14 @@ function createAiService({ app, configStore }) {
       return enqueueImageRequest(request, () => {
         const config = configStore.load();
         return generateImageWithConfig(app, config, request);
+      });
+    },
+
+    async describeImage(filePath, context) {
+      const request = { queueScopeId: 'image-library-metadata' };
+      return enqueueTextRequest(request, () => {
+        const config = configStore.load();
+        return describeImageWithConfig(app, config, filePath, context);
       });
     },
 

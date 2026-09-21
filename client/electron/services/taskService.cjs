@@ -170,6 +170,15 @@ const taskDefinitions = {
     stateKey: 'feasibilityReport',
     field: 'humanWritingTask',
   },
+  'past-bid-template-extraction': {
+    label: '历史标书内容模板提炼',
+    group: 'past-bid-template',
+    groupLabel: '历史标书内容模板',
+    step: 1,
+    lockPolicy: 'none',
+    stateKey: 'pastBidTemplate',
+    field: 'pastBidTemplateExtractionTask',
+  },
 };
 
 function now() {
@@ -314,7 +323,7 @@ function createTask(type, payload) {
   };
 }
 
-function createTaskService({ aiService, agentService, autoConfirmationService, technicalPlanStore, rejectionCheckStore, duplicateCheckStore, feasibilityReportStore, knowledgeBaseService, duplicateCheckService, openXmlHelperService }) {
+function createTaskService({ aiService, agentService, autoConfirmationService, technicalPlanStore, rejectionCheckStore, duplicateCheckStore, feasibilityReportStore, knowledgeBaseService, imageLibraryService, duplicateCheckService, openXmlHelperService, pastBidTemplateStore }) {
   const subscribers = new Set();
   const callbackSubscribers = new Set();
   const activeTasks = new Map();
@@ -890,7 +899,7 @@ function createTaskService({ aiService, agentService, autoConfirmationService, t
         signal: taskControl.signal,
       },
     );
-    runner({ aiService: runnerAiService, agentService: runnerAgentService, ordinaryAgentService: runnerOrdinaryAgentService, workspaceStore: runnerWorkspaceStore, knowledgeBaseService, openXmlHelperService, updateTask, checkpointTask, payload, taskControl, previousState }).catch((error) => {
+    runner({ aiService: runnerAiService, agentService: runnerAgentService, ordinaryAgentService: runnerOrdinaryAgentService, workspaceStore: runnerWorkspaceStore, knowledgeBaseService, imageLibraryService, openXmlHelperService, pastBidTemplateStore, updateTask, checkpointTask, payload, taskControl, previousState }).catch((error) => {
       if (!taskControl.signal.aborted) {
         checkpointTask({ status: 'error', error: error.message || '任务执行失败' });
       }
@@ -1403,6 +1412,11 @@ function createTaskService({ aiService, agentService, autoConfirmationService, t
     },
     startBidAnalysis(payload) {
       return startManagedTask('bid-analysis', payload, runBidAnalysisTask);
+    },
+    startPastBidTemplateExtraction(payload, runner) {
+      return startManagedTask('past-bid-template-extraction', payload, runner, {}, {
+        skipInitialStateUpdate: true,
+      });
     },
     startOutlineGeneration(payload) {
       const outlineMode = payload?.outline_mode === 'standalone-technical'

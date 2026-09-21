@@ -1,6 +1,5 @@
 import * as Dialog from '@radix-ui/react-dialog';
 import { useEffect, useMemo, useState } from 'react';
-import { trackConfigUsage } from '../../../shared/analytics/analytics';
 import { bidAnalysisTasks, getBidAnalysisTasks } from '../services/bidAnalysisWorkflow';
 import { MarkdownFullscreenViewer, MarkdownRenderer, ProgressBar, useToast } from '../../../shared/ui';
 import BidSectionSelectorDialog from '../components/BidSectionSelectorDialog';
@@ -360,14 +359,12 @@ function BidAnalysisPage({
         setFullRerunLocked(true);
       }
       const configState = await saveConfig(normalizedTaskIds, false, nextBidSectionMode);
-      const config = await window.yibiao?.config.load();
       await window.yibiao?.tasks.startBidAnalysis({
         mode: configState.mode,
         selected_task_ids: configState.selectedTaskIds,
         task_ids: taskIds,
         force_rerun: forceRerun,
       });
-      trackConfigUsage({ bid_analysis_mode: configState.mode }, config);
       setSettingsOpen(false);
       showToast(retryTask ? `${retryTask.label}重新解析任务已在后台启动` : '招标文件解析任务已在后台启动', 'success');
     } catch (error) {

@@ -3,11 +3,15 @@ const fs = require('node:fs');
 const fsp = require('node:fs/promises');
 const path = require('node:path');
 const { dialog } = require('electron');
-const { getKnowledgeBaseDir } = require('../utils/paths.cjs');
+const { getKnowledgeBaseDir, getImportedImagesDir } = require('../utils/paths.cjs');
 const { deleteImportedImageBatches } = require('../utils/importedImages.cjs');
 const { enqueueJsonLine, enqueueLogRemoval } = require('../utils/silentFileLog.cjs');
 const { splitUserTextByContextLimit } = require('../utils/userTextSplitter.cjs');
 const { parseDocumentWithConfig } = require('./fileService.cjs');
+const {
+  collectImageSectionAnchors,
+  mergeAnchorsIntoDocumentImages,
+} = require('./imageSectionAnchor.cjs');
 
 const supportedExtensions = new Set(['.doc', '.docx', '.wps', '.pdf', '.md', '.markdown', '.xls', '.xlsx']);
 const oversizedBlockChars = 8000;
@@ -21,6 +25,52 @@ const PROMPT_CACHE_WARMUP_DELAY_MS = 5000;
 
 function now() {
   return new Date().toISOString();
+}
+
+const IMAGE_MIME_BY_EXT = {
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.png': 'image/png',
+  '.gif': 'image/gif',
+  '.webp': 'image/webp',
+  '.bmp': 'image/bmp',
+};
+
+function mimeFromExt(ext) {
+  return IMAGE_MIME_BY_EXT[String(ext || '').toLowerCase()] || 'image/*';
+}
+
+/** 从解析后的 Markdown 中收集 yibiao-asset://imported-images 引用，解析为图片元数据入库。 */
+async function collectDocumentImages(appRef, markdown, documentId) {
+  const records = [];
+  const urlPattern = /yibiao-asset:\/\/imported-images\/([^/\s)]+)\/([^\s)]+)/g;
+  let match;
+  while ((match = urlPattern.exec(String(markdown || ''))) !== null) {
+    const batchId = decodeURIComponent(match[1]);
+    const fileName = decodeURIComponent(match[2]);
+    const filePath = path.join(getImportedImagesDir(appRef), batchId, fileName);
+    let stat;
+    try {
+      stat = await fsp.stat(filePath);
+    } catch {
+      continue;
+    }
+    if (!stat.isFile()) continue;
+    const ext = path.extname(fileName).toLowerCase();
+    records.push({
+      image_id: `img-${crypto.randomUUID()}`,
+      document_id: documentId,
+      batch_id: batchId,
+      asset_url: `yibiao-asset://imported-images/${encodeURIComponent(batchId)}/${encodeURIComponent(fileName)}`,
+      file_name: fileName,
+      mime: mimeFromExt(ext),
+      ext: ext.replace(/^\./, '') || null,
+      byte_size: stat.size,
+    });
+  }
+  // 采集每张图归属的目录章节（原件回填依据）；锚点按文件名对齐。
+  const anchors = collectImageSectionAnchors(markdown);
+  return mergeAnchorsIntoDocumentImages(records, anchors);
 }
 
 /** 等待服务商写入提示词前缀缓存后再 fan-out */
@@ -346,6 +396,14 @@ function filterBlocks(rawBlocks) {
   const kept = [];
   const filtered = [];
 
+  function isShortButStructured(block) {
+    const content = String(block?.content || '').trim();
+    if (block?.type === 'table' || block?.type === 'list') return true;
+    if (/!\[[^\]]*\]\([^\)]+\)|<img\b|<table\b/i.test(content)) return true;
+    const meaningfulLines = content.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+    return meaningfulLines.some((line) => /^[^\s:：]{1,30}\s*[:：]\s*\S+/.test(line));
+  }
+
   rawBlocks.forEach((block, index) => {
     const repeatedKey = normalizeRepeatedText(block.content);
     const repeated = repeatedKey && repeatedKey.length <= 80 && repeatedCounts.get(repeatedKey) >= 3;
@@ -353,7 +411,7 @@ function filterBlocks(rawBlocks) {
       ? 'empty'
       : isPageNumberBlock(block.content)
         ? 'page_number'
-        : getContentCharCount(block.content) < 100
+        : getContentCharCount(block.content) < 100 && !isShortButStructured(block)
           ? 'too_short'
           : isCatalogBlock(block.content)
             ? 'catalog'
@@ -1025,7 +1083,6 @@ function createReport({ blocks, filteredBlocks, candidateItems, finalItems, matc
   discarded.forEach((item) => item.block_ids.forEach((id) => discardedSet.add(id)));
   const systemSet = new Set();
   systemDiscarded.forEach((item) => item.block_ids.forEach((id) => systemSet.add(id)));
-  const handled = new Set([...matched, ...discardedSet, ...systemSet]);
   const total = blocks.length || 1;
 
   return {
@@ -1039,7 +1096,8 @@ function createReport({ blocks, filteredBlocks, candidateItems, finalItems, matc
     new_items_from_recovery_count: recoveryAttempts.reduce((sum, attempt) => sum + attempt.new_items.length, 0),
     recovery_attempt_count: recoveryAttempts.length,
     batch_size: batchSize,
-    coverage_rate: Number((handled.size / total).toFixed(4)),
+    // coverage_rate 对外表示真正进入知识条目的 block 比例，不再将丢弃内容计为覆盖。
+    coverage_rate: Number((matched.size / total).toFixed(4)),
     matched_rate: Number((matched.size / total).toFixed(4)),
     created_at: now(),
   };
@@ -1215,12 +1273,17 @@ function createKnowledgeBaseService({ app, aiService, configStore, knowledgeBase
         supplementItems = null;
         candidateItems = [];
         updateDocument(documentId, { status: 'converting', progress: 15, message: '正在转换为 Markdown', error: null }, webContents);
+        // 重新转换时先清空该文档的旧图片记录与文件批次
+        knowledgeBaseStore.replaceDocumentImages(documentId, []);
+        deleteImportedImageBatches(app, `knowledge-${documentId}`);
         const result = await runDocumentStep(documentId, 'convert_markdown', async () => {
-          const parsedMarkdown = stripMarkdownFence((await parseDocumentWithConfig(app, sourcePath, config, { assetScope: `knowledge-${documentId}`, preserveImages: false })).trim());
+          const parsedMarkdown = stripMarkdownFence((await parseDocumentWithConfig(app, sourcePath, config, { assetScope: `knowledge-${documentId}`, preserveImages: true })).trim());
           if (!parsedMarkdown) throw new Error('文档未解析出有效 Markdown 内容');
           await fsp.writeFile(markdownPath, `${parsedMarkdown}\n`, 'utf-8');
           knowledgeBaseStore.updateMarkdownMetadata(documentId, parsedMarkdown);
-          debugLog(documentId, 'prepare:converted-markdown', { markdown_path: markdownPath, markdown_chars: parsedMarkdown.length });
+          const imageRecords = await collectDocumentImages(app, parsedMarkdown, documentId);
+          knowledgeBaseStore.replaceDocumentImages(documentId, imageRecords);
+          debugLog(documentId, 'prepare:converted-markdown', { markdown_path: markdownPath, markdown_chars: parsedMarkdown.length, image_count: imageRecords.length });
           return { markdown_chars: parsedMarkdown.length };
         });
         markdown = fs.readFileSync(markdownPath, 'utf-8').trim();
@@ -2051,7 +2114,7 @@ function createKnowledgeBaseService({ app, aiService, configStore, knowledgeBase
       updateDocument(documentId, {
         status: 'success',
         progress: 100,
-        message: `整理完成，共 ${saveResult.final_item_count} 条，覆盖率 ${Math.round(saveResult.report.coverage_rate * 100)}%`,
+        message: `整理完成，共 ${saveResult.final_item_count} 条，有效匹配率 ${Math.round(saveResult.report.coverage_rate * 100)}%`,
         item_count: saveResult.final_item_count,
         candidate_item_count: recoveryResult.items.length,
         discarded_block_count: saveResult.report.discarded_blocks_count,
@@ -2307,5 +2370,6 @@ module.exports = {
     normalizeCandidateItems,
     normalizeMatchResult,
     normalizeRecoveryResult,
+    createReport,
   },
 };

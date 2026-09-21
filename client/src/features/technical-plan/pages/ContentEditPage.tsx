@@ -1,10 +1,9 @@
 import * as Dialog from '@radix-ui/react-dialog';
 import * as Popover from '@radix-ui/react-popover';
 import { memo, useCallback, useEffect, useMemo, useState, type CSSProperties, type ReactNode } from 'react';
-import { trackConfigUsage } from '../../../shared/analytics/analytics';
 import { AppSwitch, MarkdownEditor, MarkdownFullscreenViewer, MarkdownRenderer, ProgressBar, useToast } from '../../../shared/ui';
 import { OUTLINE_CONTENT_MODE_LABELS } from '../../../shared/types';
-import type { ClientConfig, ImageModelStatus, OutlineContentMode, OutlineData, OutlineItem, OutlineWordControlOptions } from '../../../shared/types';
+import type { ClientConfig, ImageModelStatus, OutlineContentMode, OutlineData, OutlineItem, OutlineWordControlOptions, TemplateFillProgress, TemplateFillResult } from '../../../shared/types';
 import { countReadableWords } from '../../../shared/utils/wordCount';
 import type { BackgroundTaskState, ConsistencyRepairMode, ContentGenerationOptions, ContentGenerationSectionStatus, ContentGenerationSections, ContentIllustrationKind, ContentIllustrationPlanState, ContentTableRequirement, OriginalPlanCoverageRepairMode, TechnicalPlanWorkflowKind } from '../types';
 import type { ExportFormatConfig } from '../../../shared/types/exportFormat';
@@ -25,6 +24,7 @@ interface ContentEditPageProps {
   sections: ContentGenerationSections;
   onContentGenerationOptionsChange: (options: ContentGenerationOptions) => Promise<void> | void;
   onContentSaved: (item: OutlineItem, content: string) => Promise<void> | void;
+  onRefreshState?: () => Promise<void> | void;
 }
 
 type TreeStatus = ContentGenerationSectionStatus | 'partial' | 'planning' | 'pending';
@@ -81,14 +81,16 @@ const illustrationKindLabels: Record<ContentIllustrationKind, string> = {
   html: 'HTML 图片',
   mermaid: 'Mermaid 图片',
   ai: 'AI 图片',
+  asset: '素材库图片',
 };
 
-const illustrationKinds: ContentIllustrationKind[] = ['html', 'mermaid', 'ai'];
+const illustrationKinds: ContentIllustrationKind[] = ['html', 'mermaid', 'ai', 'asset'];
 
 const imageGenerationExamples: Record<ContentIllustrationKind, { src: string; alt: string }> = {
   ai: { src: aiImageExampleUrl, alt: 'AI 生图示例' },
   mermaid: { src: mermaidImageExampleUrl, alt: 'Mermaid 生图示例' },
   html: { src: htmlImageExampleUrl, alt: 'HTML 生图示例' },
+  asset: { src: aiImageExampleUrl, alt: '素材库图片示例' },
 };
 
 // 渲染生图示例入口使用的帮助图标。
@@ -296,6 +298,7 @@ function ContentEditPage({
   sections,
   onContentGenerationOptionsChange,
   onContentSaved,
+  onRefreshState,
 }: ContentEditPageProps) {
   const { showToast } = useToast();
   const isExpansionWorkflow = workflowKind === 'existing-plan-expansion';
@@ -317,6 +320,11 @@ function ContentEditPage({
   const [htmlImageTypesDraft, setHtmlImageTypesDraft] = useState(DEFAULT_HTML_IMAGE_TYPES);
   const [previewImage, setPreviewImage] = useState<{ src: string; alt: string } | null>(null);
   const [pausePending, setPausePending] = useState(false);
+  const [templateFillReport, setTemplateFillReport] = useState<TemplateFillResult | null>(null);
+  // 模板填写是一串串行 AI 请求，没有进度与取消入口时用户只能看到一个转不动的界面。
+  const [templateFillRunning, setTemplateFillRunning] = useState(false);
+  const [templateFillCancelling, setTemplateFillCancelling] = useState(false);
+  const [templateFillProgress, setTemplateFillProgress] = useState<TemplateFillProgress | null>(null);
   const [exportFormat, setExportFormat] = useState<ExportFormatConfig>(DEFAULT_EXPORT_FORMAT);
   const [developerMode, setDeveloperMode] = useState(false);
   const firstLeafId = allLeaves[0]?.id || '';
@@ -338,6 +346,7 @@ function ContentEditPage({
       html: { planned: 0, success: 0 },
       mermaid: { planned: 0, success: 0 },
       ai: { planned: 0, success: 0 },
+      asset: { planned: 0, success: 0 },
     };
 
     contentIllustrationPlan?.items.forEach((item) => {
@@ -594,6 +603,52 @@ function ContentEditPage({
   const editing = Boolean(selectedItem && selectedIsLeaf && editingItemId === selectedItem.id);
   const imageModelAvailable = imageModelStatus === 'available';
 
+  useEffect(() => {
+    const subscribe = window.yibiao?.technicalPlan?.onTemplateFillProgress;
+    if (!subscribe) return;
+    return subscribe((progress) => setTemplateFillProgress(progress));
+  }, []);
+
+  const handleTemplateFill = useCallback(async () => {
+    if (templateFillRunning) return;
+    setTemplateFillRunning(true);
+    setTemplateFillCancelling(false);
+    setTemplateFillProgress({ phase: 'start', index: 0, total: 0, filled: 0, failed: 0 });
+    try {
+      const result = await window.yibiao?.technicalPlan?.runTemplateFill?.();
+      // 合规章节的短板信息（哪些章节没检索到材料）是长文本，toast 会被截断，
+      // 落成常驻面板用户才能照着去补材料。
+      setTemplateFillReport(result || null);
+      const tone = result?.status === 'error' || result?.status === 'partial' ? 'error' : 'info';
+      showToast(result?.message || '模板填写完成', tone);
+      if (onRefreshState) {
+        await onRefreshState();
+      }
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : '模板填写失败', 'error');
+    } finally {
+      setTemplateFillRunning(false);
+      setTemplateFillCancelling(false);
+      setTemplateFillProgress((prev) => (prev ? { ...prev, phase: 'done' } : prev));
+    }
+  }, [onRefreshState, showToast, templateFillRunning]);
+
+  const handleCancelTemplateFill = useCallback(async () => {
+    setTemplateFillCancelling(true);
+    try {
+      const result = await window.yibiao?.technicalPlan?.cancelTemplateFill?.();
+      if (result?.message) {
+        showToast(result.message, 'info');
+      }
+      if (!result?.canceled) {
+        setTemplateFillCancelling(false);
+      }
+    } catch (error) {
+      setTemplateFillCancelling(false);
+      showToast(error instanceof Error ? error.message : '取消模板填写失败', 'error');
+    }
+  }, [showToast]);
+
   const handlePreviewImage = useCallback((src: string, alt: string) => setPreviewImage({ src, alt }), []);
 
   useEffect(() => {
@@ -739,7 +794,6 @@ function ContentEditPage({
     if (!awaitingContentDecision || !unresolvedCount || taskBlocksGeneration) return;
     try {
       await window.yibiao?.tasks.startContentGeneration({ retryFailedSections: true });
-      trackConfigUsage({ content_generation_action: 'retry_failed_sections' });
       showToast('失败小节重试任务已在后台启动', 'success');
     } catch (error) {
       showToast(error instanceof Error ? error.message : '启动失败小节重试失败', 'error');
@@ -751,7 +805,6 @@ function ContentEditPage({
     if (!awaitingContentDecision || taskBlocksGeneration) return;
     try {
       await window.yibiao?.tasks.startContentGeneration({ continuePostProcessing: true });
-      trackConfigUsage({ content_generation_action: 'continue_with_ignored_sections' });
       setContinuePostProcessingDialogOpen(false);
       showToast('后续处理任务已在后台启动', 'success');
     } catch (error) {
@@ -766,7 +819,6 @@ function ContentEditPage({
 
     try {
       await window.yibiao?.tasks.startContentGeneration({ rerunIllustrations: true });
-      trackConfigUsage({ content_generation_action: 'rerun_illustrations' });
       showToast('仅重新配图任务已在后台启动', 'success');
     } catch (error) {
       showToast(error instanceof Error ? error.message : '启动仅重新配图任务失败', 'error');
@@ -837,16 +889,6 @@ function ContentEditPage({
         originalPlanCoverageRepairMode: isExpansionWorkflow ? savedGenerationOptions.originalPlanCoverageRepairMode : undefined,
       },
     });
-    trackConfigUsage({
-      table_requirement: savedGenerationOptions.tableRequirement,
-      use_mermaid_images: savedGenerationOptions.useMermaidImages,
-      use_ai_images: nextImageModelAvailable && savedGenerationOptions.useAiImages,
-      content_generation_action: contentGenerationAction,
-      enable_consistency_audit: savedGenerationOptions.enableConsistencyAudit,
-      consistency_repair_mode: savedGenerationOptions.enableConsistencyAudit ? savedGenerationOptions.consistencyRepairMode : undefined,
-      enable_original_plan_coverage_audit: isExpansionWorkflow && savedGenerationOptions.enableOriginalPlanCoverageAudit,
-      original_plan_coverage_repair_mode: isExpansionWorkflow && savedGenerationOptions.enableOriginalPlanCoverageAudit ? savedGenerationOptions.originalPlanCoverageRepairMode : undefined,
-    }, config);
     setGenerationDialogOpen(false);
     showToast(simulatePartialFailures
       ? '随机失败模式正文生成任务已在后台启动'
@@ -907,16 +949,6 @@ function ContentEditPage({
           originalPlanCoverageRepairMode: isExpansionWorkflow ? 'normal' : undefined,
         },
       });
-      trackConfigUsage({
-        table_requirement: savedGenerationOptions.tableRequirement,
-        use_mermaid_images: savedGenerationOptions.useMermaidImages,
-        use_ai_images: nextImageModelAvailable && savedGenerationOptions.useAiImages,
-        content_generation_action: 'regenerate_section',
-        enable_consistency_audit: savedGenerationOptions.enableConsistencyAudit,
-        consistency_repair_mode: savedGenerationOptions.enableConsistencyAudit ? savedGenerationOptions.consistencyRepairMode : undefined,
-        enable_original_plan_coverage_audit: isExpansionWorkflow && savedGenerationOptions.enableOriginalPlanCoverageAudit,
-        original_plan_coverage_repair_mode: isExpansionWorkflow && savedGenerationOptions.enableOriginalPlanCoverageAudit ? 'normal' : undefined,
-      }, config);
       setSelectedItemId(requirementItem.id);
       setRequirementItem(null);
       setRegenerateRequirement('');
@@ -1065,6 +1097,21 @@ function ContentEditPage({
           <button
             type="button"
             className="outline-config-action"
+            onClick={handleTemplateFill}
+            disabled={taskInFlight || templateFillRunning}
+            aria-label="模板填写"
+            title="为标记为模板填写的章节生成内容（每个章节最长 4 分钟，可随时取消）"
+          >
+            {templateFillRunning ? '模板填写中…' : '模板填写'}
+          </button>
+          {templateFillRunning && (
+            <button type="button" className="outline-config-action" onClick={handleCancelTemplateFill} disabled={templateFillCancelling} aria-label="取消模板填写">
+              {templateFillCancelling ? '正在取消…' : '取消'}
+            </button>
+          )}
+          <button
+            type="button"
+            className="outline-config-action"
             onClick={openGenerationDialog}
             disabled={taskInFlight || !leaves.length}
             aria-label="打开正文生成配置"
@@ -1093,6 +1140,62 @@ function ContentEditPage({
           )}
         </div>
       </section>
+
+      {templateFillProgress && (
+        <section className="content-generation-command-bar" aria-label="模板填写进度">
+          <div>
+            <span className="section-kicker">模板填写进度</span>
+            <strong>
+              {templateFillProgress.phase === 'done'
+                ? `已处理 ${templateFillProgress.index}/${templateFillProgress.total} 个章节`
+                : templateFillProgress.total
+                  ? `正在处理 ${templateFillProgress.index}/${templateFillProgress.total}：${templateFillProgress.title || ''}`
+                  : '正在读取目录与参考知识库…'}
+            </strong>
+            <p>
+              成功 {templateFillProgress.filled} 个，失败 {templateFillProgress.failed} 个。
+              串行生成，单章节最长 4 分钟；参考文档越多越慢，可先减少参考知识库再重跑。
+            </p>
+          </div>
+          <div className="content-generation-actions">
+            {templateFillRunning ? (
+              <button type="button" className="outline-config-action" onClick={handleCancelTemplateFill} disabled={templateFillCancelling} aria-label="取消模板填写">
+                {templateFillCancelling ? '正在取消…' : '取消模板填写'}
+              </button>
+            ) : (
+              <button type="button" className="outline-config-action" onClick={() => setTemplateFillProgress(null)}>收起</button>
+            )}
+          </div>
+        </section>
+      )}
+
+      {templateFillReport && (templateFillReport.no_evidence_sections?.length || !templateFillReport.knowledge_documents) && (
+        <section className="content-generation-command-bar" aria-label="模板填写取证结果">
+          <div>
+            <span className="section-kicker">模板填写取证</span>
+            <strong>
+              {templateFillReport.no_evidence_sections?.length
+                ? `${templateFillReport.no_evidence_sections.length} 个合规章节未检索到知识库材料`
+                : '本次未使用参考知识库'}
+            </strong>
+            <p>
+              合规章节里的证书号、业绩、财务与人员信息只能来自参考知识库，检索不到的部分已写成「待补充」。请补齐下列章节所需材料后重跑模板填写。
+            </p>
+            {templateFillReport.no_evidence_sections?.length ? (
+              <ul>
+                {templateFillReport.no_evidence_sections.map((title) => <li key={title}>{title}</li>)}
+              </ul>
+            ) : null}
+            <p>
+              已读取参考知识库 {templateFillReport.knowledge_documents || 0} 份文档，
+              {templateFillReport.evidence_section_count || 0} 个章节检索到材料。
+            </p>
+          </div>
+          <div className="content-generation-actions">
+            <button type="button" className="outline-config-action" onClick={() => setTemplateFillReport(null)}>知道了</button>
+          </div>
+        </section>
+      )}
 
       {showIllustrationStats && (
         <aside className="content-dev-stats-panel" aria-label="开发者配图统计">
