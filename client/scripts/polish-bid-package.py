@@ -52,11 +52,19 @@ SDT_VALUES = {
     '营业执照号': BIZ_NO,
     '经营范围': BIZ_SCOPE,
     '备注（最大月生产能力）': MONTH_CAPACITY,
+    # 真实历史响应里的生产能力表：已签合同填 '/'、剩余产能与最大产能相同
+    '备注（已签合同）': '/',
+    '备注（剩余月生产能力）': MONTH_CAPACITY,
+    # 采购人公开信息（中国化学赛鼎宁波工程有限公司官网/年报）
+    '采购人地址': '浙江省宁波市宁波国家高新区光华路300号赛鼎大厦',
+    '采购人电话': '0574-87918666',
 }
 
 # 3.2 设备照片 / 3.4 体系证书 / 3.1 营业执照（均来自真实技术文件 media）
 TECH_MEDIA = {
     'biz_license': ('word/media/image9.jpeg', '营业执照（三证合一）'),
+    'idcards': ('word/media/image8.png',
+                '法定代表人及委托代理人身份证复印件（加盖公章）'),
     'm600t': ('word/media/image10.png', '600t 起重机试验台'),
     'juanban': ('word/media/image11.jpeg', '卷板机'),
     'paoWan': ('word/media/image12.png', '抛丸机'),
@@ -66,6 +74,11 @@ TECH_MEDIA = {
     'iso9001': ('word/media/image18.png', '质量管理体系认证证书'),
     'iso14001': ('word/media/image19.png', '环境管理体系认证证书'),
     'iso45001': ('word/media/image20.jpeg', '职业健康安全管理体系认证证书'),
+    'license_ts': ('word/media/image75.jpeg',
+                   '特种设备生产许可证（A级 桥式/门式起重机）'),
+    'contract1': ('word/media/image83.jpeg', '同类物资供货合同（框架合同下订单）'),
+    'contract2': ('word/media/image84.jpeg', '同类物资供货合同技术附件（首页）'),
+    'contract3': ('word/media/image85.jpeg', '同类物资供货合同（续页）'),
 }
 
 RPR_BASE = ('<w:rPr><w:rFonts w:ascii="SimSun" w:hAnsi="SimSun" w:eastAsia="SimSun" '
@@ -173,11 +186,15 @@ def fill_slots_in_para(para, values, label):
 
 def fill_underline_paragraphs(doc):
     # 响应函项目名称：『我方已经仔细阅读____采购（采购编号』
+    # （响应文件里同一格式可能出现两份——正文 + 重复格式区，两份都要填）
+    n = 0
     for ps, pe, para in list(iter_paragraphs(doc)):
         if '我方已经仔细阅读' in flat(para):
             new_para = fill_slots_in_para(para, [PROJECT_NAME], '响应函项目名')
-            doc = doc.replace(para, new_para, 1)
-            break
+            if new_para != para:
+                doc = doc.replace(para, new_para, 1)
+                n += 1
+    log(f'响应函项目名 {n} 份')
     # 纯落款段：____年____月____日
     n = 0
     for ps, pe, para in list(iter_paragraphs(doc)):
@@ -187,13 +204,13 @@ def fill_underline_paragraphs(doc):
                 doc = doc.replace(para, new_para, 1)
                 n += 1
     log(f'落款日期段 {n} 处')
-    # 2.1 落款段：申请人：____（盖单位章）____年____月____日
+    # 2.1 落款段：申请人：____（盖单位章）____年____月____日（全部匹配段）
     for ps, pe, para in list(iter_paragraphs(doc)):
         f = flat(para)
         if '（盖单位章）' in f and '年' in f and '申请人：' in f:
             new_para = fill_slots_in_para(para, [COMPANY, '2026', '8', '16'], '2.1 落款')
-            doc = doc.replace(para, new_para, 1)
-            break
+            if new_para != para:
+                doc = doc.replace(para, new_para, 1)
     return doc
 
 
@@ -209,27 +226,29 @@ AUTH_TEMPLATE = ('本授权书声明：注册于{u}河南{/u}省{u}新乡市{/u}
 
 
 def rebuild_authorization(doc):
+    """按真实历史响应重建授权委托书（文档里出现几份就重建几份）。"""
+    n = 0
     for ps, pe, para in list(iter_paragraphs(doc)):
-        if '本授权书声明' in flat(para):
-            pm = re.match(r'(<w:p(?:\s[^>]*)?>)(<w:pPr>[\s\S]*?</w:pPr>)?([\s\S]*?)(</w:p>)', para)
-            # 解析模板为 (text, underline) 序列
-            seq, mode = [], 'n'
-            for tok in re.split(r'(\{/?u\})', AUTH_TEMPLATE):
-                if tok == '{u}':
-                    mode = 'u'
-                elif tok == '{/u}':
-                    mode = 'n'
-                elif tok:
-                    seq.append((tok, mode == 'u'))
-            runs = []
-            for text, u in seq:
-                rpr = RPR_U if u else RPR_BASE
-                runs.append(f'<w:r>{rpr}<w:t xml:space="preserve">{text}</w:t></w:r>')
-            new_para = (pm.group(1) + (pm.group(2) or '') + ''.join(runs) + pm.group(4))
-            doc = doc.replace(para, new_para, 1)
-            log('2.2 授权委托书按真实历史版重建')
-            return doc
-    print('  ! 未找到授权委托书段落')
+        if '本授权书声明' not in flat(para):
+            continue
+        pm = re.match(r'(<w:p(?:\s[^>]*)?>)(<w:pPr>[\s\S]*?</w:pPr>)?([\s\S]*?)(</w:p>)', para)
+        # 解析模板为 (text, underline) 序列
+        seq, mode = [], 'n'
+        for tok in re.split(r'(\{/?u\})', AUTH_TEMPLATE):
+            if tok == '{u}':
+                mode = 'u'
+            elif tok == '{/u}':
+                mode = 'n'
+            elif tok:
+                seq.append((tok, mode == 'u'))
+        runs = []
+        for text, u in seq:
+            rpr = RPR_U if u else RPR_BASE
+            runs.append(f'<w:r>{rpr}<w:t xml:space="preserve">{text}</w:t></w:r>')
+        new_para = (pm.group(1) + (pm.group(2) or '') + ''.join(runs) + pm.group(4))
+        doc = doc.replace(para, new_para, 1)
+        n += 1
+    log(f'2.2 授权委托书按真实历史版重建 {n} 份')
     return doc
 
 
@@ -315,49 +334,57 @@ def insert_images(doc, zout_entries):
     added = []
     body_start = body_start_pos(doc)
 
-    def anchor_iter(doc, needle):
-        """取最后一个匹配（目录行在前、正文标题在后，保证锚到正文）。"""
-        hit = None
-        for ps, pe, para in list(iter_paragraphs(doc)):
-            if needle in flat(para):
-                hit = (ps, pe, para)
-        return hit
+    def anchor_iter(doc, needle, last=True):
+        """默认取最后一个匹配（目录行在前、正文标题在后）。
+        last=False 时返回所有匹配（重复格式区也要插图）。"""
+        hits = [(ps, pe, para) for ps, pe, para in iter_paragraphs(doc)
+                if needle in flat(para)]
+        if not hits:
+            return None
+        return hits[-1] if last else hits
 
     plan = [
-        # (锚点文本, 该锚点后插的 (media key, 图注, 宽上限) 列表)
+        # (锚点文本, [(media key, 图注, 宽上限)], 是否插到每个匹配处)
         ('应附申请人营业执照副本及其年检合格的证明材料',
-         [('biz_license', 3.9)]),
+         [('biz_license', 3.9)], False),
         ('附生产企业的主要生产设备型号、台套数',
          [('m600t', 4.8), ('juanban', 4.4), ('paoWan', 4.4),
-          ('cnc', 4.4), ('weld', 4.4), ('paint', 4.8)]),
+          ('cnc', 4.4), ('weld', 4.4), ('paint', 4.8)], False),
         ('3.4 质量保证能力证明',
-         [('iso9001', 3.9), ('iso14001', 3.9), ('iso45001', 3.9)]),
+         [('license_ts', 4.2), ('iso9001', 3.9), ('iso14001', 3.9),
+          ('iso45001', 3.9)], False),
+        # 2.2 授权委托书后附身份证复印件（正文 + 重复格式区各一份）
+        ('被授权代理人身份证号码', [('idcards', 4.6)], True),
+        # 3.5 业绩表：同类物资合同协议书复印件
+        ('应附中标通知书或成交通知书',
+         [('contract1', 4.6), ('contract2', 4.6), ('contract3', 4.6)], False),
     ]
     doc_pr = 900
     rid_n = 2000
     inserts = []  # (位置, xml)
-    for needle, items in plan:
-        hit = anchor_iter(doc, needle)
+    for needle, items, every in plan:
+        hit = anchor_iter(doc, needle, last=not every)
         if not hit:
             print(f'  ! 未找到锚点: {needle}')
             continue
-        ps, pe, para = hit
-        block = []
-        for key, maxw in items:
-            path, caption = TECH_MEDIA[key]
-            data = tz.read(path)
-            ext = path.rsplit('.', 1)[-1].lower()
-            rid = f'rIdP{rid_n}'
-            rid_n += 1
-            mname = f'media/polish_{rid_n}.{ "jpeg" if ext in ("jpg","jpeg") else ext }'
-            zout_entries.append((f'word/{mname}', data))
-            added.append((rid, mname,
-                          'image/jpeg' if ext in ('jpg', 'jpeg') else f'image/{ext}'))
-            doc_pr += 1
-            block.append(image_para(data, rid, key, doc_pr, maxw, 5.6))
-            block.append(caption_para(f'图{doc_pr - 900}  {caption}'))
-        inserts.append((pe, ''.join(block)))
-        log(f'锚点「{needle[:18]}…」后插 {len(items)} 图')
+        targets = hit if every else [hit]
+        for ps, pe, para in targets:
+            block = []
+            for key, maxw in items:
+                path, caption = TECH_MEDIA[key]
+                data = tz.read(path)
+                ext = path.rsplit('.', 1)[-1].lower()
+                rid = f'rIdP{rid_n}'
+                rid_n += 1
+                mname = f'media/polish_{rid_n}.{ "jpeg" if ext in ("jpg","jpeg") else ext }'
+                zout_entries.append((f'word/{mname}', data))
+                added.append((rid, mname,
+                              'image/jpeg' if ext in ('jpg', 'jpeg') else f'image/{ext}'))
+                doc_pr += 1
+                block.append(image_para(data, rid, key, doc_pr, maxw, 5.6))
+                block.append(caption_para(f'图{doc_pr - 900}  {caption}'))
+            inserts.append((pe, ''.join(block)))
+            log(f'锚点「{needle[:18]}…」后插 {len(items)} 图')
     for pos, xml in sorted(inserts, key=lambda t: -t[0]):
         doc = doc[:pos] + xml + doc[pos:]
     tz.close()
