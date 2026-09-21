@@ -32,7 +32,7 @@ const OUT_BASE = path.join(
   'bid-package',
 );
 
-const TENDER_DOCX = path.join(
+const DEFAULT_TENDER_DOCX = path.join(
   WORKSPACE_ROOT,
   'docs',
   'raw_bids',
@@ -43,10 +43,26 @@ const TENDER_DOCX = path.join(
 );
 
 // 技术册沿用本项目自家真实技术文件（中原奥起 2026-08 为同一采购编号提交的版本）。
-const TECHNICAL_DOCX = path.join(WORKSPACE_ROOT, 'docs', 'raw_bids', '赛鼎工程', '赛鼎 技术文件0818.docx');
+const DEFAULT_TECHNICAL_DOCX = path.join(WORKSPACE_ROOT, 'docs', 'raw_bids', '赛鼎工程', '赛鼎 技术文件0818.docx');
 
 /** 响应册要抽的那一章。 */
-const RESPONSE_CHAPTER_TITLE = '第六章 响应文件格式';
+const DEFAULT_CHAPTER_TITLE = '第六章 响应文件格式';
+
+/** 命令行覆盖：--tender <招标文件> --tech <技术文件> --chapter <章标题> */
+function parseArgs(argv) {
+  const opts = {};
+  for (let i = 0; i < argv.length; i += 1) {
+    const a = argv[i];
+    if (a === '--tender') opts.tender = argv[(i += 1)];
+    else if (a === '--tech') opts.tech = argv[(i += 1)];
+    else if (a === '--chapter') opts.chapter = argv[(i += 1)];
+  }
+  return opts;
+}
+const CLI = parseArgs(process.argv.slice(2));
+const TENDER_DOCX = CLI.tender ? path.resolve(CLI.tender) : DEFAULT_TENDER_DOCX;
+const TECHNICAL_DOCX = CLI.tech ? path.resolve(CLI.tech) : DEFAULT_TECHNICAL_DOCX;
+const RESPONSE_CHAPTER_TITLE = CLI.chapter || DEFAULT_CHAPTER_TITLE;
 
 const cleanOnExit = [];
 process.on('exit', () => {

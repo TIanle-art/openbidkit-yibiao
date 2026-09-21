@@ -46,29 +46,72 @@ function buildCompanyBrief(profile, facts) {
 }
 
 /**
+ * 字段级确定性规则：像「投标人名称」「投标货币」「偏差说明」这类表格短槽，
+ * 语义固定，绝不能进模型自由发挥（模型只会拿企业简介当万能答案）。
+ * 返回 null 表示没有规则命中，交给 aiWriter。
+ */
+function deterministicValue(name, profile, facts) {
+  const f = profile?.fields || {};
+  const n = String(name || '');
+  if (/^(投标人名称|供应商名称|申请人名称|投标单位|报价人名称|乙方名称)$/.test(n.trim())) {
+    return f.company_name || null;
+  }
+  if (/(员工总数|职工总数|人员总数|在册职工)/.test(n) && f.staff_total) return String(f.staff_total);
+  if (/(投标货币|报价货币|币种)/.test(n)) return '人民币';
+  if (/偏差说明/.test(n)) return '无偏差';
+  if (/(章节及条款号|条款号)/.test(n)) return '—';
+  if (/(法定代表人姓名|法定代表人)$/.test(n.trim()) && f.legal_rep_name) return f.legal_rep_name;
+  if (/^(联系人|联系人姓名)$/.test(n.trim()) && f.contact_person) return f.contact_person;
+  if (/(联系电话|联系电话号码)$/.test(n.trim()) && f.phone) return f.phone;
+  if (/(传真|传真号码|传真\/电话号码)$/.test(n.trim()) && f.fax) return f.fax;
+  if (/(邮政编码|邮编)$/.test(n.trim()) && f.postal_code) return String(f.postal_code);
+  if (/(注册地址|单位地址|公司地址|办公地址)$/.test(n.trim()) && f.company_address) {
+    return f.company_address;
+  }
+  if (/(注册资金|注册资本)$/.test(n.trim()) && f.registered_capital) return String(f.registered_capital);
+  if (/(成立时间|成立日期)$/.test(n.trim()) && f.founded_date) return String(f.founded_date);
+  return null;
+}
+
+/**
  * 造 aiWriter：把「字段名 + 填写要求 + 企业事实简报」交给模型。
  * 明令禁止输出资料之外的编号/金额/日期——采购编号被编出来，整份响应文件作废。
+ * 提示词按栏目形态分型：值槽（人名/编号/金额类）只允许回填一个短语，
+ * 叙述类才允许一段话——否则模型把企业简介当万能答案填进每个格子。
  */
 function createGroundedAiWriter({ chat, profileStore, facts }) {
   if (typeof chat !== 'function') return null;
-  const brief = buildCompanyBrief(profileStore.load(), facts);
+  const profile = profileStore.load();
+  const brief = buildCompanyBrief(profile, facts);
+  const shortSlots = [
+    '名称', '姓名', '职务', '编号', '号码', '日期', '时间', '数量', '单价', '总价',
+    '金额', '地址', '电话', '传真', '邮编', '证号', '证书', '品牌', '型号', '规格',
+    '单位', '币种', '货币', '标段', '包号', '页码',
+  ];
   return async ({ name, instruction }) => {
+    const rule = deterministicValue(name, profile, facts);
+    if (rule !== null && rule !== undefined) return rule;
+
+    const isShort = shortSlots.some((k) => String(name || '').includes(k));
     const prompt = [
-      '你是投标文件撰写助手。下面是一家企业的真实资料：',
+      '你是投标文件填写助手。下面是一家企业的真实资料：',
       '',
       brief,
       '',
-      `现在要为响应文件里的一个栏目写内容。栏目名：${name}`,
+      `现在要为响应文件里的一个栏目填值。栏目名：${name}`,
       instruction ? `填写要求：${instruction}` : '',
       '',
+      isShort
+        ? '这个栏目是一个**值槽**（表格里的短格）。只输出要填入的那个值本身'
+        : '这个栏目是**叙述栏**。只输出直接回答该栏目所问的内容',
       '硬性要求：',
-      '1. 只用上面给出的资料，禁止出现资料里没有的编号、金额、日期、证书号、人名；',
-      '2. 200 字以内，一段中文，不要换行、不要用 Markdown 符号；',
-      '3. 语气客观、书面，不夸张、不写「领先」「一流」这类无据形容词；',
-      '4. 直接输出正文，不要任何前缀或解释。',
+      '1. 答案必须直接回答栏目所问，禁止把企业简介、资质罗列当万能答案；',
+      '2. 只用上面给出的资料，禁止出现资料里没有的编号、金额、日期、证书号、人名；',
+      isShort ? '3. 30 字以内，一个短语或一句话，不要标点结尾；' : '3. 120 字以内，一段中文，不要换行；',
+      '4. 不要 Markdown、不要任何前缀或解释。',
     ].filter(Boolean).join('\n');
 
-    const text = await chat({ messages: [{ role: 'user', content: prompt }], max_tokens: 800 });
+    const text = await chat({ messages: [{ role: 'user', content: prompt }], max_tokens: 400 });
     return String(text || '').replace(/\s+/g, ' ').trim();
   };
 }
@@ -132,4 +175,5 @@ module.exports = {
   runTemplateFieldFilling,
   buildCompanyBrief,
   createGroundedAiWriter,
+  deterministicValue,
 };
