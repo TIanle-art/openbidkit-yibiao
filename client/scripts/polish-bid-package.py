@@ -328,46 +328,145 @@ def body_start_pos(doc):
     return toc_pe
 
 
+def section_media_of_tech():
+    """解析技术文件：章节标题 -> [media 路径]。
+
+    技术文件就是中原奥起按同一格式交过的真实响应文件，它各章下面挂的图
+    （财务报表/合同/证书/设备照片…）就是「该章应附什么证明材料」的权威答案。
+    """
+    tz = zipfile.ZipFile(TECH)
+    x = tz.read('word/document.xml').decode('utf-8', errors='replace')
+    rels = tz.read('word/_rels/document.xml.rels').decode('utf-8', errors='replace')
+    rmap = {}
+    for m in re.finditer(r'<Relationship\b[^>]*>', rels):
+        s = m.group(0)
+        rid = re.search(r'Id="([^"]+)"', s)
+        tgt = re.search(r'Target="([^"]+)"', s)
+        if rid and tgt:
+            rmap[rid.group(1)] = tgt.group(1)
+    paras = list(re.finditer(r'<w:p(?:\s[^>]*)?>[\s\S]*?</w:p>', x))
+    heads = []
+    for i, pm in enumerate(paras):
+        t = flat(pm.group(0)).strip()
+        if re.match(r'^\d+(\.\d+)*[\.．]?\s*\S', t) and len(t) < 40:
+            heads.append((i, t))
+    out = {}
+    for i, pm in enumerate(paras):
+        for m in re.finditer(r'r:embed="([^"]+)"', pm.group(0)):
+            sec = ''
+            for hi, ht in heads:
+                if hi <= i:
+                    sec = ht
+                else:
+                    break
+            lst = out.setdefault(sec, [])
+            tgt = rmap.get(m.group(1), '')
+            if tgt and tgt not in lst:
+                lst.append(tgt)
+    tz.close()
+    return out
+
+
+def section_end_pos(doc, title_ps):
+    """某章标题段之后，到下一个章节标题段之前 = 该章正文末尾（证明材料挂这里）。"""
+    for ps, pe, para in iter_paragraphs(doc):
+        if ps <= title_ps:
+            continue
+        t = flat(para).strip()
+        if re.match(r'^\d+(\.\d+)*[\.．]?\s*\S', t) and len(t) < 40:
+            return ps
+    tail = doc.rfind('<w:sectPr')
+    return tail if tail > 0 else len(doc)
+
+
+# 源（技术文件）章节 -> 目标（响应文件）章节标题 -> 图注统称
+SECTION_MEDIA_MAP = [
+    ('41001565710050219711', '3.1 申请人基本情况表', '营业执照及资质证明'),
+    ('600t试验台', '3.2 生产能力证明', '主要生产设备照片'),
+    ('1.主要检测器具：', '3.2 生产能力证明', '主要检测器具照片'),
+    ('15.防锈、喷漆：', '3.2 生产能力证明', '涂装工艺照片'),
+    ('379.63', '3.3 近两年财务状况表', '财务会计报表'),
+    ('3.4 质量保证能力证明', '3.4 质量保证能力证明', '质量保证能力证明'),
+    ('2023.9', '3.5 近五年同类物资供货业绩表', '同类物资供货合同'),
+    ('3.6 履约信用证明', '3.6 履约信用证明', '履约信用证明'),
+    ('11.生产企业简介', '11.生产企业简介', '生产企业简介附图'),
+    ('12. 申请人提供的其他资料CE认证证书', '12.申请人提供的其他资料', '其他资质资料'),
+]
+
+# 指定位置补的图（源图不在任何章节分组里、或要贴在特殊位置时用）
+SPOT_MEDIA_PLAN = [
+    # 2.2 授权委托书：法定代表人 + 委托代理人身份证复印件（正文和重复格式区各一份）
+    ('被授权代理人身份证号码', [('idcards', 4.6)], True),
+]
+
+
 def insert_images(doc, zout_entries):
-    """在锚点段落后插图（锚点只从正文区找，避免插进目录）。返回 (doc, 追加 media)。"""
+    """插图：① 按章节整批搬技术文件各章的证明材料；② 特殊位置补图。"""
     tz = zipfile.ZipFile(TECH)
     added = []
     body_start = body_start_pos(doc)
+    tech_media = section_media_of_tech()
 
-    def anchor_iter(doc, needle, last=True):
-        """默认取最后一个匹配（目录行在前、正文标题在后）。
-        last=False 时返回所有匹配（重复格式区也要插图）。"""
-        hits = [(ps, pe, para) for ps, pe, para in iter_paragraphs(doc)
-                if needle in flat(para)]
-        if not hits:
-            return None
-        return hits[-1] if last else hits
+    def last_match(needle):
+        """取正文区最后一个匹配（目录行在前、正文在后）。"""
+        hit = None
+        for ps, pe, para in iter_paragraphs(doc):
+            if ps >= body_start and needle in flat(para):
+                hit = (ps, pe, para)
+        return hit
 
-    plan = [
-        # (锚点文本, [(media key, 图注, 宽上限)], 是否插到每个匹配处)
-        ('应附申请人营业执照副本及其年检合格的证明材料',
-         [('biz_license', 3.9)], False),
-        ('附生产企业的主要生产设备型号、台套数',
-         [('m600t', 4.8), ('juanban', 4.4), ('paoWan', 4.4),
-          ('cnc', 4.4), ('weld', 4.4), ('paint', 4.8)], False),
-        ('3.4 质量保证能力证明',
-         [('license_ts', 4.2), ('iso9001', 3.9), ('iso14001', 3.9),
-          ('iso45001', 3.9)], False),
-        # 2.2 授权委托书后附身份证复印件（正文 + 重复格式区各一份）
-        ('被授权代理人身份证号码', [('idcards', 4.6)], True),
-        # 3.5 业绩表：同类物资合同协议书复印件
-        ('应附中标通知书或成交通知书',
-         [('contract1', 4.6), ('contract2', 4.6), ('contract3', 4.6)], False),
-    ]
+    def emit_items(items):
+        """items = [(图注统称, [media 路径])]，按给定顺序生成图块。"""
+        nonlocal doc_pr, rid_n
+        block = []
+        for label, paths in items:
+            total = len(paths)
+            for k, path in enumerate(paths, 1):
+                # 从 rels 拿到的 Target 是 media/xxx，zip 里是 word/media/xxx
+                zpath = path if path.startswith('word/') else f'word/{path}'
+                data = tz.read(zpath)
+                ext = zpath.rsplit('.', 1)[-1].lower()
+                rid = f'rIdP{rid_n}'
+                rid_n += 1
+                mname = f'media/polish_{rid_n}.{"jpeg" if ext in ("jpg", "jpeg") else ext}'
+                zout_entries.append((f'word/{mname}', data))
+                added.append((rid, mname,
+                              'image/jpeg' if ext in ('jpg', 'jpeg') else f'image/{ext}'))
+                doc_pr += 1
+                block.append(image_para(data, rid, f'{label}{k}', doc_pr, 4.8, 5.6))
+                cap = f'{label}（{k}/{total}）' if total > 1 else label
+                block.append(caption_para(f'图{doc_pr - 900}  {cap}'))
+        return ''.join(block)
+
     doc_pr = 900
     rid_n = 2000
-    inserts = []  # (位置, xml)
-    for needle, items, every in plan:
-        hit = anchor_iter(doc, needle, last=not every)
+    inserts = []  # (位置, xml | [(label, paths)])
+
+    # ① 按章节整批搬（同一目标章节的多个来源合并成一组，保证顺序）
+    groups = {}
+    for src_sec, dst_title, label in SECTION_MEDIA_MAP:
+        paths = tech_media.get(src_sec) or []
+        if not paths:
+            print(f'  ! 源章节「{src_sec}」没有图')
+            continue
+        hit = last_match(dst_title)
         if not hit:
+            print(f'  ! 未找到目标章节: {dst_title}')
+            continue
+        end = section_end_pos(doc, hit[0])
+        groups.setdefault(end, []).append((label, paths))
+        log(f'章节「{dst_title}」← 源「{src_sec[:16]}」{len(paths)} 张')
+    for end, items in groups.items():
+        inserts.append((end, items))
+
+    # ② 特殊位置补图
+    for needle, items, every in SPOT_MEDIA_PLAN:
+        hits = [(ps, pe, para) for ps, pe, para in iter_paragraphs(doc)
+                if ps >= body_start and needle in flat(para)]
+        if not hits:
             print(f'  ! 未找到锚点: {needle}')
             continue
-        targets = hit if every else [hit]
+        targets = hits if every else [hits[-1]]
         for ps, pe, para in targets:
             block = []
             for key, maxw in items:
@@ -376,7 +475,7 @@ def insert_images(doc, zout_entries):
                 ext = path.rsplit('.', 1)[-1].lower()
                 rid = f'rIdP{rid_n}'
                 rid_n += 1
-                mname = f'media/polish_{rid_n}.{ "jpeg" if ext in ("jpg","jpeg") else ext }'
+                mname = f'media/polish_{rid_n}.{"jpeg" if ext in ("jpg", "jpeg") else ext}'
                 zout_entries.append((f'word/{mname}', data))
                 added.append((rid, mname,
                               'image/jpeg' if ext in ('jpg', 'jpeg') else f'image/{ext}'))
@@ -385,7 +484,11 @@ def insert_images(doc, zout_entries):
                 block.append(caption_para(f'图{doc_pr - 900}  {caption}'))
             inserts.append((pe, ''.join(block)))
             log(f'锚点「{needle[:18]}…」后插 {len(items)} 图')
-    for pos, xml in sorted(inserts, key=lambda t: -t[0]):
+
+    # 位置从后往前插，避免位置漂移（同位置多组已在上面合并）
+    inserts.sort(key=lambda t: -t[0])
+    for pos, payload in inserts:
+        xml = emit_items(payload) if isinstance(payload, list) else payload
         doc = doc[:pos] + xml + doc[pos:]
     tz.close()
     return doc, added
