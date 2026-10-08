@@ -1591,11 +1591,13 @@ function createTechnicalPlanStore({ app, db, fileService, agentService, taskLogS
     const timestamp = now();
     for (const [nodeId, value] of entries) {
       if (!value?.plan) continue;
+      const previous = safeJsonParse(db.prepare('SELECT plan_json FROM technical_plan_content_plans WHERE node_id = ?').get(nodeId)?.plan_json, null);
+      const nextPlan = { ...value.plan, supplemental_evidence: value.plan.supplemental_evidence ?? previous?.plan?.supplemental_evidence ?? [] };
       upsert.run({
         node_id: nodeId,
         plan_json: JSON.stringify({
           plan_version: Number(value.plan_version),
-          plan: value.plan,
+          plan: nextPlan,
           ...(value.table_requirement ? { table_requirement: value.table_requirement } : {}),
         }),
         updated_at: value.updated_at || timestamp,
@@ -2332,7 +2334,22 @@ function createTechnicalPlanStore({ app, db, fileService, agentService, taskLogS
     return { contentGenerationOptions, contentIllustrationPlan: undefined };
   }
 
-  function saveChapterContent({ nodeId, content }) {
+  function saveSupplementalEvidence(nodeId, evidence) {
+    const transaction = db.transaction(() => {
+      assertContentEditingAllowed();
+      if (!db.prepare('SELECT node_id FROM technical_plan_outline_nodes WHERE node_id = ?').get(nodeId)) throw new Error('当前目录中未找到该小节');
+      const plans = loadContentPlans();
+      const current = plans[nodeId] || { plan_version: 1, plan: { knowledge: { item_ids: [] }, facts: { titles: [] }, table: { needed: false, purpose: '' } } };
+      plans[nodeId] = { ...current, plan: { ...current.plan,
+        supplemental_evidence: [...(current.plan.supplemental_evidence || []).filter((item) => item.id !== evidence.id)
+          .map((item) => evidence.target_entry_id && item.target_entry_id === evidence.target_entry_id && evidence.confirmed === false ? { ...item, superseded: true } : item), evidence],
+      }, updated_at: now() };
+      saveContentPlans(plans);
+    });
+    transaction();
+  }
+
+  function saveChapterContent({ nodeId, content, provenance }) {
     const transaction = db.transaction(() => {
       assertContentEditingAllowed();
       const timestamp = now();
@@ -2345,10 +2362,48 @@ function createTechnicalPlanStore({ app, db, fileService, agentService, taskLogS
         VALUES (?, ?, NULL, ?)
         ON CONFLICT(node_id) DO UPDATE SET status = excluded.status, error = NULL, updated_at = excluded.updated_at
       `).run(nodeId, nextContent.trim() ? 'success' : 'idle', timestamp);
+      if (provenance) {
+        const plans = loadContentPlans();
+        const current = plans[nodeId] || { plan_version: 1, plan: { knowledge: { item_ids: [] }, facts: { titles: [] }, table: { needed: false, purpose: '' } } };
+        plans[nodeId] = { ...current, plan: { ...current.plan, evidence_pack: {
+          ...provenance,
+          output_hash: crypto.createHash('sha256').update(nextContent).digest('hex'),
+        } } };
+        saveContentPlans(plans);
+      }
       clearContentIllustrationPlan();
     });
     transaction();
     return { contentIllustrationPlan: undefined };
+  }
+
+  function loadQuotationAudit(nodeId) {
+    const node = db.prepare('SELECT content FROM technical_plan_outline_nodes WHERE node_id = ?').get(nodeId);
+    if (!node) throw new Error('当前目录中未找到该小节');
+    const row = db.prepare('SELECT content_hash, decisions_json, updated_at FROM technical_plan_quotation_audits WHERE node_id = ?').get(nodeId);
+    return {
+      node_id: nodeId,
+      content_hash: crypto.createHash('sha256').update(String(node.content || '')).digest('hex'),
+      saved_content_hash: row?.content_hash || '',
+      decisions: row ? safeJsonParse(row.decisions_json, []) : [],
+      updated_at: row?.updated_at || '',
+    };
+  }
+
+  function saveQuotationAudit({ nodeId, contentHash, decisions }) {
+    const transaction = db.transaction(() => {
+      const node = db.prepare('SELECT content FROM technical_plan_outline_nodes WHERE node_id = ?').get(nodeId);
+      if (!node) throw new Error('当前目录中未找到该小节');
+      const currentHash = crypto.createHash('sha256').update(String(node.content || '')).digest('hex');
+      if (currentHash !== contentHash) return { saved: false, current_hash: currentHash };
+      const timestamp = now();
+      db.prepare(`INSERT INTO technical_plan_quotation_audits (node_id, content_hash, decisions_json, updated_at)
+        VALUES (?, ?, ?, ?) ON CONFLICT(node_id) DO UPDATE SET
+        content_hash = excluded.content_hash, decisions_json = excluded.decisions_json, updated_at = excluded.updated_at`)
+        .run(nodeId, currentHash, JSON.stringify(decisions || []), timestamp);
+      return { saved: true, updated_at: timestamp };
+    });
+    return transaction();
   }
 
   async function runBeforeCommit(beforeCommit) {
@@ -2710,6 +2765,17 @@ function createTechnicalPlanStore({ app, db, fileService, agentService, taskLogS
     saveIllustrationPng,
     saveContentGenerationOptions,
     saveChapterContent,
+    loadQuotationAudit,
+    saveQuotationAudit,
+    saveSupplementalEvidence,
+    resolveEvidencePath(filename) {
+      return path.join(app.getPath('userData'), 'workspace', 'provenance-evidence', filename);
+    },
+    resolveProvenanceSourcePath(locator) {
+      if (locator.kind === 'original') return originalPlanMarkdownPath;
+      const file = loadTenderSourceFiles().find((item) => item.id === locator.id);
+      return file ? resolveMarkdownPath(file.sourceDocxPath || file.markdownPath) : '';
+    },
     clearBidTemplate,
     listTenderSourceDocxRelativePaths() {
       return loadTenderSourceFiles()

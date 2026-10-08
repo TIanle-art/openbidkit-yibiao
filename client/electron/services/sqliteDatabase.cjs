@@ -4,7 +4,7 @@ const crypto = require('node:crypto');
 const Database = require('better-sqlite3');
 const { getWorkspaceDatabasePath } = require('../utils/paths.cjs');
 
-const schemaVersion = 32;
+const schemaVersion = 33;
 
 function createInitialSchema(db) {
   db.exec(`
@@ -127,6 +127,14 @@ function createInitialSchema(db) {
     CREATE TABLE IF NOT EXISTS technical_plan_content_plans (
       node_id TEXT PRIMARY KEY,
       plan_json TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      FOREIGN KEY (node_id) REFERENCES technical_plan_outline_nodes(node_id) ON DELETE CASCADE
+    );
+
+    CREATE TABLE IF NOT EXISTS technical_plan_quotation_audits (
+      node_id TEXT PRIMARY KEY,
+      content_hash TEXT NOT NULL,
+      decisions_json TEXT NOT NULL DEFAULT '[]',
       updated_at TEXT NOT NULL,
       FOREIGN KEY (node_id) REFERENCES technical_plan_outline_nodes(node_id) ON DELETE CASCADE
     );
@@ -1060,6 +1068,16 @@ function addImageSectionAnchorColumns(db) {
   `);
 }
 
+function createQuotationAuditSchema(db) {
+  db.exec(`CREATE TABLE IF NOT EXISTS technical_plan_quotation_audits (
+    node_id TEXT PRIMARY KEY,
+    content_hash TEXT NOT NULL,
+    decisions_json TEXT NOT NULL DEFAULT '[]',
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY (node_id) REFERENCES technical_plan_outline_nodes(node_id) ON DELETE CASCADE
+  )`);
+}
+
 function createSchemaMigrationsTable(db) {
   db.exec(`
     CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -1290,6 +1308,11 @@ const schemaHealthTableGroups = [
       'technical_plan_content_plans',
     ],
     repair: createInitialSchema,
+  },
+  {
+    version: 33,
+    tables: ['technical_plan_quotation_audits'],
+    repair: createQuotationAuditSchema,
   },
   {
     version: 2,
@@ -1840,6 +1863,11 @@ const migrations = [
     version: 32,
     description: '图片索引新增章节锚点，支持按目录章节回填原件',
     up: addImageSectionAnchorColumns,
+  },
+  {
+    version: 33,
+    description: '新增字段溯源卡人工审查结论表',
+    up: createQuotationAuditSchema,
   },
 ];
 

@@ -13,6 +13,7 @@ import { formatOutlineTitle } from '../../../shared/utils/outlineNumbering';
 import aiImageExampleUrl from '../../../../assets/generate_img_example/ai.png';
 import mermaidImageExampleUrl from '../../../../assets/generate_img_example/mermaid.png';
 import htmlImageExampleUrl from '../../../../assets/generate_img_example/html.png';
+import { SectionProvenanceDialog } from '../components/SectionProvenanceDialog';
 
 interface ContentEditPageProps {
   workflowKind: TechnicalPlanWorkflowKind;
@@ -305,6 +306,7 @@ function ContentEditPage({
   const allLeaves = useMemo(() => outlineData?.outline ? collectLeafItems(outlineData.outline) : [], [outlineData]);
   const leaves = useMemo(() => allLeaves.filter((item) => item.content_mode === 'ai-generate'), [allLeaves]);
   const [selectedItemId, setSelectedItemId] = useState('');
+  const [provenanceOpen, setProvenanceOpen] = useState(false);
   const [editingItemId, setEditingItemId] = useState<string | null>(null);
   const [isPreviewing, setIsPreviewing] = useState(false);
   const [draftContent, setDraftContent] = useState('');
@@ -1252,6 +1254,7 @@ function ContentEditPage({
               <p>{selectedItem?.description || '选择左侧目录项查看生成正文。'}</p>
             </div>
             <div className="content-reader-actions">
+              <button type="button" className="secondary-action" disabled={!selectedItem || !selectedIsLeaf || editing} onClick={() => setProvenanceOpen(true)}>来源与参考</button>
               <span className={`content-status-badge is-${selectedStatus}`}>{statusLabels[selectedStatus]}</span>
               {editing ? (
                 <>
@@ -1308,6 +1311,7 @@ function ContentEditPage({
         </article>
       </section>
 
+      <SectionProvenanceDialog nodeId={selectedItemId} content={selectedContent} open={provenanceOpen} onOpenChange={setProvenanceOpen} onPreviewImage={handlePreviewImage} />
       <Dialog.Root open={continuePostProcessingDialogOpen} onOpenChange={setContinuePostProcessingDialogOpen}>
         <Dialog.Portal>
           <Dialog.Overlay className="content-regenerate-modal" />

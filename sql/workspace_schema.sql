@@ -14,7 +14,7 @@ PRAGMA busy_timeout = 5000;
 
 -- 目标完整结构版本。
 -- 运行时代码应通过 PRAGMA user_version 判断是否需要自动升级。
-PRAGMA user_version = 31;
+PRAGMA user_version = 33;
 
 CREATE TABLE IF NOT EXISTS schema_migrations (
   version INTEGER PRIMARY KEY,
@@ -231,6 +231,15 @@ ON technical_plan_content_sections(status);
 CREATE TABLE IF NOT EXISTS technical_plan_content_plans (
   node_id TEXT PRIMARY KEY,
   plan_json TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  FOREIGN KEY (node_id) REFERENCES technical_plan_outline_nodes(node_id) ON DELETE CASCADE
+);
+
+-- v32 字段溯源卡人工审查结论；与可重建的 content plan 分离保存。
+CREATE TABLE IF NOT EXISTS technical_plan_quotation_audits (
+  node_id TEXT PRIMARY KEY,
+  content_hash TEXT NOT NULL,
+  decisions_json TEXT NOT NULL DEFAULT '[]',
   updated_at TEXT NOT NULL,
   FOREIGN KEY (node_id) REFERENCES technical_plan_outline_nodes(node_id) ON DELETE CASCADE
 );

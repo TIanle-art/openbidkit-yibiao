@@ -124,6 +124,7 @@ function flattenKnowledgeReferences(references) {
       resume: String(item?.resume || ''),
       content: String(item?.content || ''),
       content_hash: String(item?.content_hash || ''),
+      document_hash: String(document.markdown_hash || ''),
       source_block_ids: uniqueStrings(item?.source_block_ids),
       category: inferItemCategory(item || {}, document),
     })).filter((item) => item.document_id && item.item_id && item.content);
@@ -187,6 +188,8 @@ function buildEvidencePack({ section, brief, references, topK = 6, characterBudg
       title: item.title,
       content: item.content,
       source_block_ids: item.source_block_ids,
+      content_hash: item.content_hash,
+      document_hash: item.document_hash,
     })),
     facts: selected.map((item) => ({
       statement: item.resume || item.title,

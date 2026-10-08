@@ -25,6 +25,84 @@ export interface BidPlanSourceRef {
   label?: string;
 }
 
+export interface SectionProvenanceEntry {
+  id: string;
+  kind: 'requirement' | 'content' | 'image';
+  title: string;
+  file_name: string;
+  document_id?: string;
+  section: string;
+  page: string;
+  block_ids: string[];
+  excerpt: string;
+  images: string[];
+  source_blocks?: Array<{ id: string; heading_path: string[]; content: string }>;
+  snapshot_hash?: string;
+  current_hash?: string;
+  status: 'recorded' | 'candidate' | 'missing' | 'changed' | 'unlocated' | 'generated';
+  association: 'reference' | 'candidate' | 'requirement' | 'embedded' | 'generated';
+  message: string;
+  evidence_id?: string;
+  target_entry_id?: string;
+  source_locator?: { kind: 'attachment' | 'knowledge' | 'tender' | 'original'; id: string };
+  physical_page?: number;
+  printed_page?: string;
+  line?: number;
+}
+
+export interface AttachSectionEvidenceRequest {
+  node_id: string;
+  target_entry_id?: string;
+  kind: SectionProvenanceEntry['kind'];
+  title: string;
+  section: string;
+  physical_page: number;
+  printed_page: string;
+  excerpt: string;
+}
+
+export interface SectionProvenance {
+  node_id: string;
+  title: string;
+  content_hash: string;
+  recorded_at: string;
+  output_changed: boolean;
+  warnings: string[];
+  entries: SectionProvenanceEntry[];
+  summary: { total: number; missing: number; candidates: number; changed: number; pages_pending: number };
+}
+
+export type AuditDecisionStatus = '待填写' | '待核对' | '待修复' | '已核验';
+export interface QuotationAuditDecision {
+  evidence_id: string;
+  status: AuditDecisionStatus;
+  note: string;
+  source_fingerprint: string;
+  reviewed_content_hash?: string;
+  /** Metadata retained when importing decisions from the hash-bound quotation field card. */
+  field_id?: string;
+  field_title?: string;
+  field_fingerprint?: string;
+  official_sha256?: string;
+  software_sha256?: string;
+  tender_sha256?: string;
+  contract_sha256?: string;
+  contract_pdf_sha256?: string;
+  spares_sha256?: string;
+  spares_pdf_sha256?: string;
+  human_decision?: string;
+  saved_at?: string;
+  audit_batch_id?: string;
+  imported_at?: string;
+}
+export interface QuotationAuditState {
+  node_id: string;
+  content_hash: string;
+  saved_content_hash: string;
+  decisions: QuotationAuditDecision[];
+  updated_at: string;
+}
+
 export interface BidPlanTechnicalTopic {
   id: string;
   title: string;

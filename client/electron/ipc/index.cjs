@@ -120,6 +120,13 @@ function sendToWebContents(webContents, channel, payload) {
 
 const workspaceDatabaseChannels = [
   'technical-plan:load-state',
+  'technical-plan:read-section-provenance',
+  'technical-plan:load-quotation-audit',
+  'technical-plan:save-quotation-audit',
+  'technical-plan:attach-section-evidence',
+  'technical-plan:open-section-source',
+  'technical-plan:supplement-section-locations',
+  'technical-plan:confirm-section-evidence',
   'technical-plan:import-tender-document',
   'technical-plan:remove-tender-document',
   'technical-plan:import-original-plan-document',
@@ -304,7 +311,7 @@ function registerWorkspaceDatabaseServices({ app, configStore, aiService, agentS
 
   clearWorkspaceDatabaseIpc();
   registerKnowledgeBaseIpc({ knowledgeBaseService });
-  registerTechnicalPlanIpc({ technicalPlanStore, taskService, aiService, knowledgeBaseService });
+  registerTechnicalPlanIpc({ app, technicalPlanStore, taskService, aiService, knowledgeBaseService, imageLibraryService });
   registerFeasibilityReportIpc({ feasibilityReportStore, taskService });
   registerDuplicateCheckIpc({ duplicateCheckStore });
   registerRejectionCheckIpc({ rejectionCheckStore, taskService });

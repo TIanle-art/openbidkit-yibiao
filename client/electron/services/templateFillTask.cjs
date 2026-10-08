@@ -197,6 +197,8 @@ function buildComplianceEvidence({ section, brief, references }) {
       title: item.title,
       content,
       source_block_ids: item.source_block_ids,
+      content_hash: item.content_hash,
+      document_hash: item.document_hash,
     });
     usedCharacters += content.length;
   }
@@ -315,6 +317,7 @@ function collectTemplateFillNodes(outlineData, tenderMarkdown, projectFactsText,
         ? buildNodeEvidence(node, evidenceContext)
         : null;
       node._evidenceText = formatEvidenceForPrompt(evidencePack);
+      node._evidencePack = evidencePack;
       node._evidence_source_count = evidencePack?.sources?.length || 0;
       nodes.push(node);
     }
@@ -417,7 +420,14 @@ async function runTemplateFillTask({ aiService, workspaceStore, knowledgeBaseSer
           errors.push(`${item.title}：生成内容为空`);
           continue;
         }
-        workspaceStore.saveChapterContent({ nodeId: item.nodeId, content: nextContent });
+        workspaceStore.saveChapterContent({ nodeId: item.nodeId, content: nextContent, provenance: {
+          sources: item._evidencePack?.sources || [],
+          tender_excerpt: buildSourceContext(item._sourceMarkdown, item.title),
+          tender_hash: storedPlan.tenderFile?.contentHash || '',
+          tender_file: storedPlan.tenderFile?.fileName || '',
+          recorded_at: new Date().toISOString(),
+          purpose: 'template-fill',
+        } });
         filled += 1;
       } catch (error) {
         // 取消时请求队列抛出的同样是普通错误，信号已中止就按「已取消」处理，不要报成失败。

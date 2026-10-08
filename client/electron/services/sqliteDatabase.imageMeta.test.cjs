@@ -6,7 +6,7 @@ const path = require('node:path');
 const Database = require('better-sqlite3');
 const { createSqliteDatabase, schemaVersion } = require('./sqliteDatabase.cjs');
 
-test('v28 工作区升级到 v31，补齐图片语义、Bid Planning 和迁移审计', (t) => {
+test('v28 工作区升级到 v33，补齐图片语义、Bid Planning 和报价函审查记录', (t) => {
   const userDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'yibiao-schema-v30-'));
   t.after(() => fs.rmSync(userDataDir, { recursive: true, force: true }));
   const databasePath = path.join(userDataDir, 'workspace', 'yibiao.sqlite');
@@ -33,7 +33,7 @@ test('v28 工作区升级到 v31，补齐图片语义、Bid Planning 和迁移�
   });
   t.after(() => workspace.close());
 
-  assert.equal(workspace.schemaVersion, 31);
+  assert.equal(workspace.schemaVersion, 33);
   assert.equal(workspace.db.pragma('user_version', { simple: true }), schemaVersion);
   const row = workspace.db.prepare('SELECT original_name, metadata_status, metadata_error FROM image_library_images WHERE image_id = ?').get('img-1');
   assert.deepEqual(row, { original_name: 'IMG_001', metadata_status: 'ready', metadata_error: null });
@@ -41,6 +41,9 @@ test('v28 工作区升级到 v31，补齐图片语义、Bid Planning 和迁移�
   assert.deepEqual(migration, { version: 30, status: 'success' });
   const planningMigration = workspace.db.prepare('SELECT version, status FROM schema_migrations WHERE version = 31').get();
   assert.deepEqual(planningMigration, { version: 31, status: 'success' });
+  const quotationAuditMigration = workspace.db.prepare('SELECT version, status FROM schema_migrations WHERE version = 33').get();
+  assert.deepEqual(quotationAuditMigration, { version: 33, status: 'success' });
+  assert.ok(workspace.db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'technical_plan_quotation_audits'").get());
   assert.ok(workspace.db.prepare("SELECT 1 FROM pragma_table_info('knowledge_documents') WHERE name = 'revision'").get());
   assert.ok(workspace.db.prepare("SELECT 1 FROM pragma_table_info('knowledge_items') WHERE name = 'content_hash'").get());
   assert.ok(workspace.db.prepare("SELECT 1 FROM pragma_table_info('technical_plan_illustration_items') WHERE name = 'asset_id'").get());

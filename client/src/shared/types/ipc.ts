@@ -6,6 +6,7 @@ import type { RejectionCheckWorkspacePatch, RejectionCheckWorkspaceState, Reject
 import type { BidAnalysisMode, BidAnalysisTaskState, BidSectionMode, ContentGenerationOptions, ContentGenerationPlanState, ContentGenerationProgressDetail, ContentGenerationRuntimeState, ContentGenerationSectionState, DetectedBidSection, GlobalFactGroupState, GlobalFactsMode, SaveOutlineRequest, SaveOutlineSelectionRequest, TechnicalPlanState, TechnicalPlanStep, TechnicalPlanWorkflowKind } from '../../features/technical-plan/types';
 import type { FeasibilityProjectInfo, FeasibilityReportState, FeasibilityReportStep, FeasibilitySaveOutlineRequest, FeasibilitySourceFile } from '../../features/feasibility-report/types';
 import type { ExportFormatConfig, ExportTemplateRecord } from './exportFormat';
+import type { SectionProvenance, AttachSectionEvidenceRequest, QuotationAuditDecision, QuotationAuditState } from '../../features/technical-plan/types';
 import type { OutlineData, OutlineExpansionMode, OutlineMode, OutlineWordControlOptions } from './outline';
 
 export interface BidTemplateChapter {
@@ -703,6 +704,14 @@ export interface YibiaoBridge {
   };
   technicalPlan: {
     loadState: () => Promise<TechnicalPlanState>;
+    readSectionProvenance: (nodeId: string) => Promise<SectionProvenance>;
+    loadQuotationAudit: (nodeId: string) => Promise<QuotationAuditState>;
+    saveQuotationAudit: (payload: { nodeId: string; contentHash: string; decisions: QuotationAuditDecision[] }) => Promise<{ saved: boolean; updated_at?: string; current_hash?: string }>;
+    exportQuotationAuditDecisions: (payload: { content: string }) => Promise<{ success: boolean; message?: string; path?: string }>;
+    attachSectionEvidence: (payload: AttachSectionEvidenceRequest) => Promise<{ canceled: boolean }>;
+    openSectionSource: (nodeId: string, entryId: string) => Promise<void>;
+    supplementSectionLocations: (nodeId: string) => Promise<{ located: number; remaining: number; source_errors: string[] }>;
+    confirmSectionEvidence: (nodeId: string, evidenceId: string, contentHash: string) => Promise<void>;
     importTenderDocument: (filePaths?: string[]) => Promise<{
       success: boolean;
       message?: string;
@@ -971,4 +980,3 @@ export interface FullFidelityBidDecomposeResult {
   chaptersCount: number;
   tableCategories: Record<string, number>;
 }
-

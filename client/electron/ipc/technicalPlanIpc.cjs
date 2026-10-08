@@ -1,8 +1,40 @@
-const { ipcMain, shell } = require('electron');
+const { ipcMain, shell, dialog, BrowserWindow } = require('electron');
+const fs = require('node:fs');
 const { runTemplateFillTask, cancelTemplateFill } = require('../services/templateFillTask.cjs');
+const { readSectionProvenance } = require('../services/sectionProvenanceService.cjs');
+const { createProvenanceAttachmentService } = require('../services/provenanceAttachmentService.cjs');
 
-function registerTechnicalPlanIpc({ technicalPlanStore, taskService, aiService, knowledgeBaseService }) {
+function registerTechnicalPlanIpc({ app, technicalPlanStore, taskService, aiService, knowledgeBaseService, imageLibraryService }) {
+  const evidence = createProvenanceAttachmentService({ app, technicalPlanStore, knowledgeBaseService, imageLibraryService });
   ipcMain.handle('technical-plan:load-state', () => technicalPlanStore.loadTechnicalPlan());
+  ipcMain.handle('technical-plan:attach-section-evidence', (event, payload) => evidence.attach(payload, event.sender));
+  ipcMain.handle('technical-plan:open-section-source', (_event, nodeId, entryId) => evidence.openSource(nodeId, entryId));
+  ipcMain.handle('technical-plan:supplement-section-locations', (_event, nodeId) => evidence.supplementLocations(nodeId));
+  ipcMain.handle('technical-plan:confirm-section-evidence', (_event, nodeId, evidenceId, contentHash) => evidence.confirm(nodeId, evidenceId, contentHash));
+  ipcMain.handle('technical-plan:read-section-provenance', (_event, nodeId) => readSectionProvenance({ nodeId, technicalPlanStore, knowledgeBaseService, imageLibraryService }));
+  ipcMain.handle('technical-plan:load-quotation-audit', (_event, nodeId) => technicalPlanStore.loadQuotationAudit(nodeId));
+  ipcMain.handle('technical-plan:save-quotation-audit', (_event, payload) => technicalPlanStore.saveQuotationAudit(payload));
+  ipcMain.handle('technical-plan:export-quotation-audit-decisions', async (event, payload) => {
+    const content = String(payload?.content || '');
+    let value;
+    try { value = JSON.parse(content); } catch { return { success: false, message: '字段决定 JSON 格式无效' }; }
+    if (value?.version !== 2 || !value?.node_id || !value?.decisions || typeof value.decisions !== 'object') {
+      return { success: false, message: '字段决定缺少有效版本、节点或决定数据' };
+    }
+    const parent = BrowserWindow.fromWebContents(event.sender);
+    const result = await dialog.showSaveDialog(parent, {
+      title: '导出报价函字段人工决定',
+      defaultPath: '报价函字段人工决定.json',
+      filters: [{ name: 'JSON 文件', extensions: ['json'] }],
+    });
+    if (result.canceled || !result.filePath) return { success: false, message: '已取消导出' };
+    try {
+      fs.writeFileSync(result.filePath, `${JSON.stringify(value, null, 2)}\n`, 'utf8');
+      return { success: true, message: '字段决定已导出', path: result.filePath };
+    } catch (error) {
+      return { success: false, message: `导出失败：${error?.message || String(error)}` };
+    }
+  });
   ipcMain.handle('technical-plan:import-tender-document', (_event, filePaths) => taskService.importTenderDocument(filePaths));
   ipcMain.handle('technical-plan:remove-tender-document', (_event, sourceId) => taskService.removeTenderDocument(sourceId));
   ipcMain.handle('technical-plan:import-original-plan-document', (_event, filePaths) => taskService.importOriginalPlanDocument(filePaths));

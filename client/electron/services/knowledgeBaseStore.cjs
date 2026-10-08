@@ -125,6 +125,7 @@ function createKnowledgeBaseStore({ app, db }) {
       document_dir: row.document_dir,
       source_path: row.source_path,
       markdown_path: row.markdown_path,
+      markdown_hash: row.markdown_hash || '',
       status: normalizeStatus(row.status),
       progress: Number(row.progress || 0),
       message: row.message || '',
@@ -561,6 +562,13 @@ function createKnowledgeBaseStore({ app, db }) {
              position_index, section_level1, section_level2, section_path_json, context_text
       FROM knowledge_document_images WHERE document_id = ? ORDER BY position_index ASC, created_at ASC
     `).all(documentId);
+  }
+
+  function findImageDocuments(assetUrls) {
+    if (!assetUrls.length) return [];
+    const placeholders = assetUrls.map(() => '?').join(', ');
+    return db.prepare(`SELECT DISTINCT document_id FROM knowledge_document_images WHERE asset_url IN (${placeholders})`)
+      .all(...assetUrls).map((row) => row.document_id);
   }
 
   // 按章节锚点取图，供原件回填按目录顺序匹配。
@@ -1089,6 +1097,8 @@ function createKnowledgeBaseStore({ app, db }) {
       return [{
         document,
         items: itemsByDocument.get(documentId) || [],
+        ...(options.includeBlocks ? { blocks: readBlocks(documentId) } : {}),
+        ...(options.includeImages ? { images: getDocumentImages(documentId) } : {}),
         ...(options.includeMarkdown ? { markdown: fs.existsSync(markdownPath) ? fs.readFileSync(markdownPath, 'utf-8') : '' } : {}),
       }];
     });
@@ -1191,6 +1201,7 @@ function createKnowledgeBaseStore({ app, db }) {
     saveMatchBatch,
     readMarkdown,
     readReferences,
+    findImageDocuments,
     saveBlocks: saveBlocksTransaction,
     readBlocks,
     readFilteredBlocks,

@@ -2340,6 +2340,13 @@ function createKnowledgeBaseService({ app, aiService, configStore, knowledgeBase
       return knowledgeBaseStore.readReferences(documentIds, options);
     },
 
+    findImageDocuments(assetUrls) {
+      return knowledgeBaseStore.findImageDocuments(assetUrls);
+    },
+    resolveSourcePath(documentId) {
+      return knowledgeBaseStore.resolvePath(knowledgeBaseStore.getDocument(documentId).source_path);
+    },
+
     readItems(documentId) {
       return knowledgeBaseStore.readItems(documentId);
     },

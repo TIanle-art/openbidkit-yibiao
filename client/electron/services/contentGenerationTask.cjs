@@ -3983,6 +3983,11 @@ async function runContentGenerationTask({ aiService, agentService, workspaceStor
       section_brief: sectionBrief,
       evidence_pack: evidencePack,
     };
+    contentPlan.evidence_pack = { ...contentPlan.evidence_pack,
+      tender_hash: storedPlan.tenderFile?.contentHash || '',
+      tender_file: storedPlan.tenderFile?.fileName || '',
+      recorded_at: now(),
+    };
 
     if (tableRequirement === 'none') {
       contentPlan = clearContentPlanTable(contentPlan);
@@ -6809,6 +6814,12 @@ workspace 文件说明：
       stats: statsSnapshot(),
       touched_item_ids: [...touchedItemIds],
     });
+    // 只绑定本轮处理的小节；旧计划不能因打开或导出被当成新溯源记录。
+    for (const { item } of collectLeafContexts(outlineData.outline)) {
+      const value = storedContentPlans[item.id];
+      if (!touchedItemIds.has(item.id) || sections[item.id]?.status !== 'success' || !value?.plan?.evidence_pack) continue;
+      value.plan.evidence_pack = { ...value.plan.evidence_pack, output_hash: textHash(item.content), recorded_at: now() };
+    }
     const qualityCheck = runBidQualityCheck({
       bidPlan: storedPlan.bidPlan,
       outlineData,
