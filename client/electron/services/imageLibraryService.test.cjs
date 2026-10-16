@@ -15,6 +15,7 @@ function createDatabase() {
       mime TEXT, ext TEXT, byte_size INTEGER NOT NULL DEFAULT 0, width INTEGER, height INTEGER,
       source_document_id TEXT, content_hash TEXT, name TEXT, original_name TEXT, description TEXT, tags TEXT,
       metadata_status TEXT NOT NULL DEFAULT 'pending', metadata_error TEXT, metadata_updated_at TEXT,
+      source_section_path_json TEXT, source_position_index INTEGER NOT NULL DEFAULT 0, source_context_text TEXT,
       created_at TEXT NOT NULL, updated_at TEXT NOT NULL
     );
     CREATE TABLE knowledge_documents (document_id TEXT PRIMARY KEY, file_name TEXT);
