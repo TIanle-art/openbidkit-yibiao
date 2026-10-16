@@ -8,7 +8,6 @@ const { createSqliteDatabase, schemaVersion } = require('./sqliteDatabase.cjs');
 
 test('v28 工作区升级到 v33，补齐图片语义、Bid Planning 和报价函审查记录', (t) => {
   const userDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'yibiao-schema-v30-'));
-  t.after(() => fs.rmSync(userDataDir, { recursive: true, force: true }));
   const databasePath = path.join(userDataDir, 'workspace', 'yibiao.sqlite');
   fs.mkdirSync(path.dirname(databasePath), { recursive: true });
   const legacy = new Database(databasePath);
@@ -31,7 +30,10 @@ test('v28 工作区升级到 v33，补齐图片语义、Bid Planning 和报价�
     getPath: () => userDataDir,
     once: (_event, listener) => listeners.push(listener),
   });
-  t.after(() => workspace.close());
+  t.after(() => {
+    workspace.close();
+    fs.rmSync(userDataDir, { recursive: true, force: true });
+  });
 
   assert.equal(workspace.schemaVersion, 33);
   assert.equal(workspace.db.pragma('user_version', { simple: true }), schemaVersion);

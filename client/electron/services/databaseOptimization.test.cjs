@@ -24,10 +24,12 @@ function createTaskLogStub() {
 
 test('知识修订、引用快照和图片外键保持一致', (t) => {
   const userDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'yibiao-database-optimization-'));
-  t.after(() => fs.rmSync(userDataDir, { recursive: true, force: true }));
   const app = createTestApp(userDataDir);
   const workspace = createSqliteDatabase(app);
-  t.after(() => workspace.close());
+  t.after(() => {
+    workspace.close();
+    fs.rmSync(userDataDir, { recursive: true, force: true });
+  });
   const { db } = workspace;
 
   const knowledgeBaseStore = createKnowledgeBaseStore({ app, db });
