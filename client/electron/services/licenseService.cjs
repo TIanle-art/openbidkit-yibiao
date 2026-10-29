@@ -3,9 +3,15 @@ const os = require('node:os');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const { execFileSync } = require('node:child_process');
-const { dialog } = require('electron');
 const { fetch } = require('undici');
 const { getLicenseFilePath } = require('../utils/paths.cjs');
+const {
+  TELEMETRY_CONSENT_KEY,
+  normalizeConsent,
+  isNetworkAllowed,
+  buildPrivacyNotice,
+  buildConsentPromptText,
+} = require('./telemetryConsent.cjs');
 
 const packageJson = require('../../package.json');
 
@@ -329,9 +335,18 @@ function statusFromPayload(payload, status, extra = {}) {
   });
 }
 
-function createLicenseService({ app, configStore }) {
+function createLicenseService({ app, configStore, fetchImpl, dialogImpl } = {}) {
   const licenseFile = getLicenseFilePath(app);
+  const doFetch = typeof fetchImpl === 'function' ? fetchImpl : fetch;
   const debugLicenseDisabled = !app.isPackaged;
+  function getDialog() {
+    if (dialogImpl) return dialogImpl;
+    try {
+      return require('electron').dialog;
+    } catch {
+      return null;
+    }
+  }
   let currentStatus = debugLicenseDisabled ? createDebugDisabledStatus() : createBaseStatus();
 
   function buildContext() {
@@ -345,6 +360,66 @@ function createLicenseService({ app, configStore }) {
       machineFingerprintHash,
       fingerprintVersion: FINGERPRINT_VERSION,
     };
+  }
+
+  function getConsent() {
+    try {
+      return normalizeConsent(configStore.load()?.[TELEMETRY_CONSENT_KEY]);
+    } catch {
+      return 'unset';
+    }
+  }
+
+  function persistConsent(value) {
+    const normalized = normalizeConsent(value);
+    if (normalized === 'unset') {
+      throw new Error('无效的联网授权值');
+    }
+    const current = configStore.load() || {};
+    configStore.save({ ...current, [TELEMETRY_CONSENT_KEY]: normalized });
+    return normalized;
+  }
+
+  function getPrivacyNotice() {
+    return { ...buildPrivacyNotice(), consent: getConsent() };
+  }
+
+  async function resolveStartupConsent() {
+    const existing = getConsent();
+    if (existing !== 'unset') {
+      return existing;
+    }
+    if (debugLicenseDisabled) {
+      return 'denied';
+    }
+    const dialogApi = getDialog();
+    if (!dialogApi || typeof dialogApi.showMessageBox !== 'function') {
+      // 无法向用户告知时，绝不静默联网：默认拒绝，只走离线授权。
+      persistConsent('denied');
+      return 'denied';
+    }
+    const result = await dialogApi.showMessageBox({
+      type: 'question',
+      buttons: ['允许联网验证授权', '仅离线使用（不联网）'],
+      defaultId: 1,
+      cancelId: 1,
+      noLink: true,
+      title: '联网授权与隐私说明',
+      message: '易标在联网验证授权时会发送设备指纹哈希等信息',
+      detail: buildConsentPromptText(),
+    });
+    const granted = Number(result?.response) === 0;
+    const value = granted ? 'granted' : 'denied';
+    persistConsent(value);
+    return value;
+  }
+
+  function decorateStatus(status) {
+    const consent = getConsent();
+    const networkConsentRequired = !debugLicenseDisabled
+      && status?.activationMode !== 'offline'
+      && !isNetworkAllowed(consent);
+    return { ...status, telemetryConsent: consent, networkConsentRequired };
   }
 
   async function evaluateLocalLicense(context) {
@@ -437,6 +512,18 @@ function createLicenseService({ app, configStore }) {
       return evaluateLocalLicense();
     }
 
+    const consent = getConsent();
+    if (!isNetworkAllowed(consent)) {
+      const localStatus = await evaluateLocalLicense();
+      currentStatus = {
+        ...localStatus,
+        telemetryConsent: consent,
+        networkConsentRequired: true,
+        lastCheckedAt: nowIso(),
+      };
+      return currentStatus;
+    }
+
     const context = buildContext();
     const localStatus = await evaluateLocalLicense(context);
     if (localStatus.activationMode === 'offline') {
@@ -459,7 +546,7 @@ function createLicenseService({ app, configStore }) {
     };
 
     try {
-      const response = await fetch(LICENSE_ENDPOINT, {
+      const response = await doFetch(LICENSE_ENDPOINT, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
@@ -493,17 +580,30 @@ function createLicenseService({ app, configStore }) {
   }
 
   async function refreshOnStartup() {
+    if (debugLicenseDisabled) {
+      return evaluateLocalLicense();
+    }
     const status = await evaluateLocalLicense();
     if (status.activationMode === 'offline') {
-      return status;
+      return decorateStatus(status);
+    }
+    const consent = await resolveStartupConsent();
+    if (!isNetworkAllowed(consent)) {
+      currentStatus = {
+        ...status,
+        telemetryConsent: consent,
+        networkConsentRequired: true,
+        lastCheckedAt: nowIso(),
+      };
+      return currentStatus;
     }
     if (status.status === 'active' && status.buildChanged) {
-      return refreshLicense();
+      return decorateStatus(await refreshLicense());
     }
     if (status.status === 'active' || status.status === 'machine_mismatch' || status.status === 'invalidated') {
-      return status;
+      return decorateStatus(status);
     }
-    return refreshLicense();
+    return decorateStatus(await refreshLicense());
   }
 
   async function activateOfflineLicenseEnvelope(envelope) {
@@ -572,7 +672,11 @@ function createLicenseService({ app, configStore }) {
       };
     }
 
-    const result = await dialog.showOpenDialog({
+    const dialogApi = getDialog();
+    if (!dialogApi || typeof dialogApi.showOpenDialog !== 'function') {
+      throw new Error('当前环境无法打开离线授权文件选择框');
+    }
+    const result = await dialogApi.showOpenDialog({
       title: '选择离线授权文件',
       properties: ['openFile'],
       filters: [
@@ -604,17 +708,26 @@ function createLicenseService({ app, configStore }) {
       const envelope = normalizeLicenseEnvelope(readJsonFile(licenseFile));
       return envelope ? { payload: envelope.payload, signature: envelope.signature } : null;
     },
-    getStatus() {
-      return evaluateLocalLicense();
+    async getStatus() {
+      return decorateStatus(await evaluateLocalLicense());
     },
-    refresh() {
-      return refreshLicense();
+    async refresh() {
+      return decorateStatus(await refreshLicense());
     },
     importOfflineFile() {
       return importOfflineLicenseFile();
     },
     activateOfflineCode(code) {
       return activateOfflineLicenseText(code);
+    },
+    getConsent() {
+      return getConsent();
+    },
+    getPrivacyNotice() {
+      return getPrivacyNotice();
+    },
+    setConsent(value) {
+      return { success: true, consent: persistConsent(value) };
     },
     refreshOnStartup,
     getCurrentStatus() {

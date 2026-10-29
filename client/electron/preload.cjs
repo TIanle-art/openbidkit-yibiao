@@ -60,6 +60,9 @@ const bridge = {
     refresh: () => ipcRenderer.invoke('license:refresh'),
     importOfflineFile: () => ipcRenderer.invoke('license:import-offline-file'),
     activateOfflineCode: (code) => ipcRenderer.invoke('license:activate-offline-code', code),
+    getPrivacyNotice: () => ipcRenderer.invoke('license:get-privacy-notice'),
+    getConsent: () => ipcRenderer.invoke('license:get-consent'),
+    setConsent: (consent) => ipcRenderer.invoke('license:set-consent', consent),
   },
   ai: {
     chat: (request) => ipcRenderer.invoke('ai:chat', request),

@@ -2,6 +2,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const { getConfigFilePath } = require('../utils/paths.cjs');
+const { normalizeConsent } = require('./telemetryConsent.cjs');
 
 const textModelProviders = ['jinlong', 'volcengine', 'deepseek', 'agnes', 'custom'];
 const legacyTextModelProviders = ['longcat'];
@@ -296,6 +297,7 @@ const defaultConfig = {
   storage_cleanup_version: 0,
   analytics_client_id: '',
   analytics_created_at: '',
+  telemetry_consent: 'unset',
 };
 
 function createAnalyticsClientId() {
@@ -763,6 +765,7 @@ function normalizeConfig(config) {
       : defaultConfig.storage_cleanup_version,
     analytics_client_id: source.analytics_client_id || defaultConfig.analytics_client_id,
     analytics_created_at: source.analytics_created_at || defaultConfig.analytics_created_at,
+    telemetry_consent: normalizeConsent(source.telemetry_consent),
   };
 }
 
@@ -844,6 +847,7 @@ function createConfigStore(app) {
           },
           analytics_client_id: config?.analytics_client_id || currentConfig.analytics_client_id,
           analytics_created_at: config?.analytics_created_at || currentConfig.analytics_created_at,
+          telemetry_consent: config?.telemetry_consent || currentConfig.telemetry_consent,
         }));
         persist(nextConfig);
         return { success: true, message: '配置已保存', config_path: configFile };

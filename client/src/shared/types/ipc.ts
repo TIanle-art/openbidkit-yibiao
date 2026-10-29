@@ -334,6 +334,8 @@ export interface LicenseRuntimeStatus {
   keyId: string;
   lastCheckedAt: string;
   refreshError?: string;
+  telemetryConsent?: 'unset' | 'granted' | 'denied' | string;
+  networkConsentRequired?: boolean;
   config: {
     freeLicenseDays: number;
     expirePopupEnabled: boolean;
@@ -641,6 +643,9 @@ export interface YibiaoBridge {
     refresh: () => Promise<LicenseRuntimeStatus>;
     importOfflineFile: () => Promise<LicenseOfflineActivationResult>;
     activateOfflineCode: (code: string) => Promise<LicenseOfflineActivationResult>;
+    getPrivacyNotice: () => Promise<Record<string, unknown> & { consent: string }>;
+    getConsent: () => Promise<{ consent: string }>;
+    setConsent: (consent: 'granted' | 'denied') => Promise<{ success: boolean; consent: string }>;
   };
   ai: {
     chat: (request: ChatCompletionRequest) => Promise<string>;
