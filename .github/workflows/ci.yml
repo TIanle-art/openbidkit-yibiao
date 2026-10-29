@@ -1,0 +1,30 @@
+name: ci
+
+# 最小质量门禁：类型检查 + 单元测试（真实 Electron 的 ELECTRON_RUN_AS_NODE 模式）。
+# e2e 需要真实 GUI 主进程，不在托管 CI 里跑，改为本地/专用机 `npm run test:e2e`。
+# 注意：本工作流为本次 AI 工作流基础建设新增，尚未在真实远程 CI 运行（仓库暂无远程工作流环境）。
+
+on:
+  push:
+    branches: [main, fix/baseline, 'chore/**']
+  pull_request:
+
+jobs:
+  typecheck-and-unit:
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: client
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: client/package-lock.json
+      - name: Install dependencies
+        run: npm ci
+      - name: Typecheck
+        run: npm run typecheck
+      - name: Unit tests (Electron runtime, ELECTRON_RUN_AS_NODE)
+        run: npm run test:unit

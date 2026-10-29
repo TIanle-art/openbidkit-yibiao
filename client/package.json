@@ -19,7 +19,13 @@
     "prepare-openxml-helper": "node scripts/prepare-openxml-helper.cjs",
     "verify-agent-tools": "node scripts/verify-agent-tools.cjs",
     "smoke:electron-native": "electron scripts/electron-native-smoke.cjs",
-    "start": "electron ."
+    "start": "electron .",
+    "typecheck": "tsc --noEmit",
+    "test:unit": "node scripts/validation/run-unit-tests.cjs",
+    "test:e2e": "node scripts/validation/run-e2e.cjs",
+    "test:ui": "node scripts/validation/run-ui-regression.cjs",
+    "verify": "npm run typecheck && npm run test:unit && npm run test:e2e && npm run test:ui",
+    "verify:ci": "npm run typecheck && npm run test:unit"
   },
   "build": {
     "appId": "com.yibiao.openbidkit",

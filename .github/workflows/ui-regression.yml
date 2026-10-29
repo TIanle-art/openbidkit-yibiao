@@ -1,0 +1,47 @@
+name: ui-regression
+
+# 真实界面回归门禁（CDP 驱动真实 Electron 渲染层，单命令可判定并留证）。
+# 说明：本工作流需要能启动 Electron GUI 的桌面会话。windows-latest 托管 runner 无交互桌面，
+# 直接跑 GUI 可能失败，因此默认仅手动触发（workflow_dispatch），建议在有桌面的自托管 runner 上运行。
+# 本地等价命令：cd client && npm run test:ui
+# 本工作流为本次 AI 工作流基础建设新增，尚未在真实远程 CI 运行。
+
+on:
+  workflow_dispatch:
+    inputs:
+      out_dir:
+        description: '证据输出目录（默认 .ui-evidence）'
+        required: false
+        default: '.ui-evidence'
+
+jobs:
+  ui-regression:
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: client
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: client/package-lock.json
+      - name: Install dependencies
+        run: npm ci
+      - name: Build renderer (dist)
+        run: npm run build
+      - name: UI regression (real Electron + CDP)
+        run: node scripts/validation/run-ui-regression.cjs --out=${{ github.workspace }}/ui-evidence
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ui-regression-evidence
+          path: |
+            ui-evidence/report.json
+            ui-evidence/ui-final.png
+            ui-evidence/drive-result.json
+            ui-evidence/electron-stdout.log
+            ui-evidence/electron-stderr.log
+          if-no-files-found: warn

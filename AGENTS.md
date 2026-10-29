@@ -7,7 +7,7 @@
 ## Client
 - 开发 `client/` 前以及初次对话时，必须先完整阅读 `client/开发说明.md`，保持框架风格一致性。
 - 没有 root `package.json`；客户端命令都先 `cd client`。
-- 安装/验证：`npm ci` 后 `npm run build`。`npm run build` 等价 `tsc --noEmit && vite build`，仓库未配置统一 lint/test 脚本。
+- 安装/验证：`npm ci` 后 `npm run build`。`npm run build` 等价 `tsc --noEmit && vite build`。统一质量命令：`npm run verify`（= `npm run typecheck` + `npm run test:unit` + `npm run test:e2e`）；分步可用同名子命令，CI 只跑 `npm run verify:ci`。
 - 开发启动：`npm run dev`，固定 Vite `127.0.0.1:5173 --strictPort` 后再启动 Electron。
 - 打包：`npm run dist:win` / `npm run dist:mac`，配置在 `client/package.json` 的 `build` 字段，产物在 `client/release/`。
 - Electron Main 和 preload 是 CommonJS：`client/electron/**/*.cjs`；Renderer 是 ESM TypeScript：`client/src/**/*.ts(x)`。
@@ -37,6 +37,7 @@
 - 改 Electron Main/preload：先在 `client/` 下运行 `node --check electron\preload.cjs` 或对应 `.cjs` 文件，再跑 `npm run build`；涉及窗口/IPC 还要 `npm run dev` 手动打开验证。
 - 改 SQLite Store、migration 或 native 模块：增加 `npm run smoke:electron-native`；有对应 `*.test.cjs` 时用 `node --test <test-file>` 定向执行。
 - 改依赖：`cd client; npm audit`。
+- 提交/合并前跑统一门禁：`cd client; npm run verify`；CI 场景跑 `npm run verify:ci`（typecheck+unit，不含需真实 GUI 的 e2e）。
 - `npm run build` 可能只有既有 chunk 体积警告；不要把它当失败，除非命令退出非 0。
 
 ## 发布
